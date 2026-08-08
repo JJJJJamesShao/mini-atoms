@@ -1,0 +1,22 @@
+name: Branch Naming
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  check-branch-name:
+    name: check-branch-name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch name
+        env:
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          if [[ ! "$HEAD_BRANCH" =~ ^(feat/.+|dev)$ ]]; then
+            echo "::error::分支名 '$HEAD_BRANCH' 不符合命名规范：必须以 'feat/' 开头（如 feat/user-login），或使用 dev。"
+            exit 1
+          fi
+          echo "分支名 '$HEAD_BRANCH' 符合规范。"

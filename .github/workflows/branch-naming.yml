@@ -1,7 +1,10 @@
 name: Branch Naming
 
+# 使用 pull_request_target：workflow 定义取自 base 分支（main），
+# PR 作者无法通过修改自己分支里的本文件来绕过校验。
+# 该 workflow 不检出 PR 代码、permissions 为空，使用 pull_request_target 是安全的。
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
 
 permissions: {}

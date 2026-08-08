@@ -9,7 +9,7 @@
 
 该规范通过两道关卡强制执行：
 
-1. **本地 pre-push hook**：推送时校验分支名，不合规直接拒绝。克隆仓库后执行一次以下命令启用：
+1. **本地 pre-push hook**：推送时校验目标分支名，不合规直接拒绝。克隆仓库后执行一次以下命令启用：
 
    ```bash
    git config core.hooksPath .githooks

@@ -1,2 +1,20 @@
 # mini-atoms
 一个智能体驱动的应用生成 Demo：用户用自然语言描述需求，系统通过 「需求澄清 → 规格确认 → 代码生成 → 自动校验 → 沙箱预览」的多阶段 Agent 流水线，实时生成可交互的单页应用，支持对话式迭代与版本管理。  技术栈：Next.js · TypeScript · Supabase · Tailwind CSS
+
+## 分支命名规范
+
+- 所有新分支必须以 `feat/` 开头，新功能与 bug fix 均适用，例如 `feat/user-login`、`feat/fix-preview-crash`。
+- 也可以使用 `dev` 分支，但多分支并行开发时建议优先使用 `feat/` 前缀，语义更清晰。
+- 不允许直接向 `main` 推送代码，所有变更须通过 Pull Request 合入。
+
+该规范通过两道关卡强制执行：
+
+1. **本地 pre-push hook**：推送时校验分支名，不合规直接拒绝。克隆仓库后执行一次以下命令启用：
+
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+
+2. **GitHub 强制检查**：仓库的 `protect-main` 规则集要求 PR 必须通过 `check-branch-name` 状态检查（见 `.github/workflows/branch-naming.yml`），即使绕过本地 hook，不合规的分支也无法合入 main。
+
+> 注：GitHub 的「Restrict branch names」规则需要付费计划，免费账户下不可用，因此服务端采用必需状态检查的方式实现同等约束。

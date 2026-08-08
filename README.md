@@ -12,6 +12,8 @@
 
 脚本依次执行：lint → `tsc --noEmit` → 生产构建 → 测试（项目未定义 test 脚本时自动跳过）。
 
+同一个脚本也是 CI 门禁：`.github/workflows/verify.yml` 在每个指向 main 的 PR 上运行 `./verify.sh`，`verify` 是 `protect-main` 规则集的必需状态检查——本地跑绿的代码才能在 CI 上跑绿。
+
 此外还有两个 git hook 在提交时自动生效（需先执行 `git config core.hooksPath .githooks`）：
 
 - **pre-commit**：对暂存文件运行 lint-staged（`eslint --fix` + `prettier --write`），格式问题自动修复，eslint error 直接拦截提交。

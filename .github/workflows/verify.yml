@@ -1,0 +1,27 @@
+name: Verify
+
+# 注意：本 workflow 检出并执行 PR 代码（npm ci + verify.sh），
+# 必须使用 pull_request 而非 pull_request_target，避免 pwn request 风险。
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run verify.sh
+        run: ./verify.sh

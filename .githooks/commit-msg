@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# commit-msg 校验：提交信息必须符合 Conventional Commits 格式：
+#   <type>(<scope 可选>): <描述>
+# type 允许：feat fix chore docs style refactor test perf ci build revert
+set -euo pipefail
+
+MSG_FILE="$1"
+SUBJECT="$(head -n 1 "$MSG_FILE")"
+
+# 自动生成的提交放行：合并提交（Merge ...）、git revert 默认信息（Revert "..."）、
+# autosquash 提交（fixup! / squash! / amend! ...）
+if [[ "$SUBJECT" =~ ^Merge\  ]] || [[ "$SUBJECT" =~ ^Revert\ \" ]] || [[ "$SUBJECT" =~ ^(fixup|squash|amend)\!\  ]]; then
+  exit 0
+fi
+
+PATTERN='^(feat|fix|chore|docs|style|refactor|test|perf|ci|build|revert)(\([a-zA-Z0-9_/.-]+\))?!?: .+$'
+
+if [[ ! "$SUBJECT" =~ $PATTERN ]]; then
+  echo "拒绝提交：提交信息不符合 Conventional Commits 格式。" >&2
+  echo "  当前内容: $SUBJECT" >&2
+  echo "  正确格式: <type>(<scope 可选>): <描述>" >&2
+  echo "  type 允许值: feat fix chore docs style refactor test perf ci build revert" >&2
+  echo "  示例: feat(auth): 添加登录页面" >&2
+  exit 1
+fi
+
+exit 0

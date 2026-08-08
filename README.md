@@ -1,5 +1,6 @@
 # mini-atoms
-一个智能体驱动的应用生成 Demo：用户用自然语言描述需求，系统通过 「需求澄清 → 规格确认 → 代码生成 → 自动校验 → 沙箱预览」的多阶段 Agent 流水线，实时生成可交互的单页应用，支持对话式迭代与版本管理。  技术栈：Next.js · TypeScript · Supabase · Tailwind CSS
+
+一个智能体驱动的应用生成 Demo：用户用自然语言描述需求，系统通过 「需求澄清 → 规格确认 → 代码生成 → 自动校验 → 沙箱预览」的多阶段 Agent 流水线，实时生成可交互的单页应用，支持对话式迭代与版本管理。 技术栈：Next.js · TypeScript · Supabase · Tailwind CSS
 
 ## 本地验证
 
@@ -10,6 +11,11 @@
 ```
 
 脚本依次执行：lint → `tsc --noEmit` → 生产构建 → 测试（项目未定义 test 脚本时自动跳过）。
+
+此外还有两个 git hook 在提交时自动生效（需先执行 `git config core.hooksPath .githooks`）：
+
+- **pre-commit**：对暂存文件运行 lint-staged（`eslint --fix` + `prettier --write`），格式问题自动修复，eslint error 直接拦截提交。
+- **commit-msg**：校验提交信息符合 Conventional Commits 格式——`<type>(<scope 可选>): <描述>`，type 允许 `feat fix chore docs style refactor test perf ci build revert`，例如 `feat(auth): 添加登录页面`。
 
 ## 分支命名规范
 

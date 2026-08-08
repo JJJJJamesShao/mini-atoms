@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# pre-commit：对暂存文件运行 lint-staged（eslint --fix + prettier --write）。
+set -euo pipefail
+
+npx lint-staged

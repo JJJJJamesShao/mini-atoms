@@ -10,6 +10,9 @@ step "1/4 lint"
 npm run lint
 
 step "2/4 tsc --noEmit"
+# LayoutProps/PageProps 等全局类型助手由 next typegen 生成（.next/ 被 gitignore，
+# CI 等干净环境下必须先 typegen，否则 tsc 报 Cannot find name 'LayoutProps'）
+npx next typegen
 npx tsc --noEmit
 
 step "3/4 build"

@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# 分支命名规范校验：新分支必须以 feat/ 开头（新功能与 bug fix 均适用），
-# 或者使用 dev 分支。main 分支同样会被拦截（直接推送 main 在 GitHub 上也被禁止）。
+# 分支命名规范校验：推送到远程的目标分支必须以 feat/ 开头（新功能与 bug fix 均适用），
+# 或者是 dev 分支。推送到 main 同样会被拦截（直接推送 main 在 GitHub 上也被禁止）。
+# 校验目标是 remote_ref（远程分支名）而非 local_ref——否则 git push origin dev:main
+# 这类「本地名合规、远程名不合规」的推送会绕过检查。
 set -euo pipefail
 
 PATTERN='^(feat/.+|dev)$'
 
 while read -r local_ref local_sha remote_ref remote_sha; do
-  # 只校验分支推送，tag 等引用跳过
-  case "$local_ref" in
-    refs/heads/*) branch="${local_ref#refs/heads/}" ;;
-    *) continue ;;
-  esac
-
   # 删除远程分支（local_sha 全零）不校验
   if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
     continue
   fi
 
+  # 只校验推送到分支的引用，tag 等跳过
+  case "$remote_ref" in
+    refs/heads/*) branch="${remote_ref#refs/heads/}" ;;
+    *) continue ;;
+  esac
+
   if [[ ! "$branch" =~ $PATTERN ]]; then
-    echo "拒绝推送：分支名 '$branch' 不符合命名规范。" >&2
+    echo "拒绝推送：目标分支名 '$branch' 不符合命名规范。" >&2
     echo "  - 新分支必须以 'feat/' 开头，例如 feat/user-login" >&2
     echo "  - 或使用 dev 分支" >&2
     echo "详见 README.md 的「分支命名规范」一节。" >&2

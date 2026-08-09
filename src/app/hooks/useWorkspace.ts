@@ -170,59 +170,20 @@ export function useWorkspace() {
       const handleEvent = (event: Record<string, unknown>) => {
         const type = event.type as string;
 
-        if (type === "stage") {
-          const state = event.state as StageName;
-          if (!STAGE_ORDER.includes(state)) return;
+        // 辅助：强制同步所有未完成的 stages
+        const finalizeStages = (status: StageStatus, note?: string) => {
+          updateVersion(id, (v) => ({
+            ...v,
+            stages: v.stages.map((s) => {
+              if (s.status === "active" || s.status === "pending") {
+                return { ...s, status, detail: note ?? s.detail };
+              }
+              return s;
+            }),
+          }));
+        };
 
-          if (event.phase === "start") {
-            setStage(
-              state,
-              "active",
-              event.isRetry ? "校验未通过，自动修复重试" : undefined,
-            );
-            pushLog(state, "start", event.isRetry ? "修复重试" : undefined);
-            return;
-          }
-
-          // phase === "end"
-          pushLog(state, "end");
-          if (state === "clarify") {
-            setStage("clarify", "done", event.summary as string);
-          } else if (state === "spec") {
-            const spec = event.spec as SpecOutput | undefined;
-            setStage(
-              "spec",
-              "done",
-              spec
-                ? `${spec.requirements.length} 条需求 / ${spec.constraints.length} 条约束 / ${spec.userStories.length} 条用户故事`
-                : undefined,
-            );
-          } else if (state === "generate") {
-            if (event.phase === "start") {
-              setStage(
-                "generate",
-                "active",
-                event.isRetry
-                  ? "校验未通过，自动修复重试中..."
-                  : "正在调用 LLM 生成代码，预计 15-30 秒...",
-              );
-            } else {
-              setStage("generate", "done", event.notes as string);
-            }
-          } else if (state === "verify") {
-            const pass = event.pass as boolean;
-            const errors = event.errors as
-              | { rule: string; message: string }[]
-              | undefined;
-            setStage(
-              "verify",
-              pass ? "done" : "failed",
-              pass
-                ? "语法与结构校验通过"
-                : errors?.map((e) => `${e.rule}: ${e.message}`).join("；"),
-            );
-          }
-        } else if (type === "agent_event") {
+        if (type === "agent_event") {
           const ae = event.payload as {
             type: string;
             agent: string;
@@ -231,74 +192,62 @@ export function useWorkspace() {
             percent?: number;
             output?: unknown;
           };
-          
-          // 处理所有 Agent 的 start/complete 事件，映射为 stage 状态
-          if (ae.type === "agent:start") {
-            const stage = ae.agent as StageName;
-            if (STAGE_ORDER.includes(stage)) {
-              setStage(stage, "active", ae.role);
-              pushLog(stage, "start", ae.role);
+          const agentStage = ae.agent as StageName;
+
+          if (ae.type === "agent:start" && STAGE_ORDER.includes(agentStage)) {
+            setStage(agentStage, "active", ae.role);
+            pushLog(agentStage, "start", ae.role);
+            return;
+          }
+
+          if (ae.type === "agent:complete" && STAGE_ORDER.includes(agentStage)) {
+            pushLog(agentStage, "end", ae.message);
+            if (agentStage === "clarify") {
+              const out = ae.output as { summary?: string } | undefined;
+              setStage("clarify", "done", out?.summary ?? "需求已澄清");
+            } else if (agentStage === "spec") {
+              const out = ae.output as SpecOutput | undefined;
+              setStage("spec", "done", out ? `${out.requirements.length} 条需求 / ${out.constraints.length} 条约束` : "规格已生成");
+            } else if (agentStage === "generate") {
+              setStage("generate", "done", ae.message ?? "代码已生成");
+            } else if (agentStage === "verify") {
+              const out = ae.output as { pass?: boolean } | undefined;
+              setStage("verify", out?.pass !== false ? "done" : "failed", ae.message ?? "校验完成");
             }
-          } else if (ae.type === "agent:complete") {
-            const stage = ae.agent as StageName;
-            if (stage === "clarify") {
-              setStage("clarify", "done", "需求已澄清");
-            } else if (stage === "spec") {
-              const spec = ae.output as SpecOutput | undefined;
-              setStage(
-                "spec",
-                "done",
-                spec
-                  ? `${spec.requirements.length} 条需求 / ${spec.constraints.length} 条约束`
-                  : "规格已生成",
-              );
-            } else if (stage === "generate") {
-              setStage("generate", "done", ae.message || "代码已生成");
-            } else if (stage === "verify") {
-              setStage("verify", "done", "校验通过");
-            }
-            pushLog(stage, "end", ae.message);
-          } else if (ae.type === "agent:thinking" || ae.type === "agent:progress") {
-            if (ae.agent === "generate") {
-              const msg = ae.message || (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
-              setStage("generate", "active", msg);
-              pushLog("generate", "progress", msg);
-            }
+            return;
+          }
+
+          if ((ae.type === "agent:thinking" || ae.type === "agent:progress") && ae.agent === "generate") {
+            const msg = ae.message || (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
+            setStage("generate", "active", msg);
+            pushLog("generate", "progress", msg);
+            return;
+          }
+
+          if (ae.type === "agent:error") {
+            setStage(agentStage, "failed", ae.message ?? "执行出错");
+            return;
           }
         } else if (type === "approve_needed") {
           approvalSessionId.current = event.sessionId as string;
-          updateVersion(id, (v) => ({
-            ...v,
-            spec: event.spec as SpecOutput,
-            status: "awaiting",
-          }));
+          updateVersion(id, (v) => ({ ...v, spec: event.spec as SpecOutput, status: "awaiting" }));
           setStage("approve", "active");
           setAwaitingApproval(true);
         } else if (type === "done") {
-          const result = event.result as {
-            files: { path: string; content: string }[];
-            notes: string;
-          } | null;
-
+          const result = event.result as { files: { path: string; content: string }[]; notes: string } | null;
           if (event.finalState === "done" && result) {
-            setStage("done", "done", `${result.files.length} 个文件`);
-            const html =
-              result.files.find((f) => f.path === "index.html") ??
-              result.files[0];
-            updateVersion(id, (v) => ({
-              ...v,
-              status: "done",
-              html: html.content,
-              note: result.notes,
-            }));
+            // 强制同步所有未完成的 stages，防止状态不一致
+            finalizeStages("done", result.notes);
+            setStage("done", "done", result.notes);
+            const html = result.files.find((f) => f.path === "index.html") ?? result.files[0];
+            updateVersion(id, (v) => ({ ...v, status: "done", html: html.content, note: result.notes }));
           } else {
-            failVersion(failReasonText(event.reason as string | null));
+            const reason = failReasonText(event.reason as string | null);
+            finalizeStages("failed", reason);
+            failVersion(reason);
           }
         } else if (type === "persist_error") {
-          updateVersion(id, (v) => ({
-            ...v,
-            note: `${v.note ?? ""}（保存到云端失败：${event.message}）`,
-          }));
+          updateVersion(id, (v) => ({ ...v, note: `${v.note ?? ""}（保存到云端失败：${event.message}）` }));
         } else if (type === "error") {
           failVersion(`服务端错误：${event.message}`);
         }

@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
-import { runPipeline, type Executors } from "@/lib/agent";
 import { createLLMExecutors } from "@/lib/agent/llm-executors";
+import { AgentEventBus } from "@/lib/agent/bus";
+import { runSOP } from "@/lib/agent/engine";
+import { selectSOP } from "@/lib/agent/router";
 import type { SpecOutput } from "@/lib/schemas";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
@@ -29,8 +31,8 @@ const jsonError = (status: number, payload: Record<string, unknown>) =>
  * 流程：
  * 1. 鉴权：未登录 401
  * 2. RBAC：角色从 profiles 表读取，免费账号额度 0 → 403；超限 → 429
- * 3. 运行流水线，SSE 实时推送各节点开始/结束事件
- * 4. approve 阶段挂起，等待前端经 /api/pipeline/confirm 注入用户决策
+ * 3. SOP 路由（selectSOP）+ runSOP 引擎执行，SSE 实时推送 Agent 事件
+ * 4. approve 阶段挂起（仅含确认门的 SOP），等待 /api/pipeline/confirm 注入决策
  * 5. 成功后持久化项目/版本/消息并关联 user_id
  */
 export async function POST(req: NextRequest) {
@@ -53,7 +55,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 2. 角色与额度（账号状态以数据库 profiles 表为准）
+  // 2. 角色与额度
   const role = await getUserRole(user.id);
   const used = await countUsageToday(user.id, "generate");
   const quota = DAILY_QUOTA[role];
@@ -70,10 +72,10 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 3. 记用量（生成前记录，防止失败重试绕过限流）
+  // 3. 记用量
   await logUsage(user.id, "generate");
 
-  // 创建 SSE 流
+  // 创建 SSE 流 + Agent EventBus
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -81,75 +83,50 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
 
-      try {
-        // 包装 LLM 执行器：节点开始/结束时实时推送阶段事件，
-        // 否则事件要等 runPipeline 返回后才有，approve 确认门会死锁
-        const base = createLLMExecutors();
-        const executors: Executors = {
-          clarify: async (inp) => {
-            send({ type: "stage", state: "clarify", phase: "start" });
-            const out = await base.clarify(inp);
-            send({
-              type: "stage",
-              state: "clarify",
-              phase: "end",
-              summary: out.summary,
-              needClarification: out.status === "need_clarification",
-            });
-            return out;
-          },
-          spec: async (c) => {
-            send({ type: "stage", state: "spec", phase: "start" });
-            const out = await base.spec(c);
-            send({ type: "stage", state: "spec", phase: "end", spec: out });
-            return out;
-          },
-          generate: async (s, errors) => {
-            send({
-              type: "stage",
-              state: "generate",
-              phase: "start",
-              isRetry: Boolean(errors?.length),
-            });
-            const out = await base.generate(s, errors);
-            send({
-              type: "stage",
-              state: "generate",
-              phase: "end",
-              notes: out.notes,
-            });
-            return out;
-          },
-          verify: async (files) => {
-            send({ type: "stage", state: "verify", phase: "start" });
-            const out = await base.verify(files);
-            send({
-              type: "stage",
-              state: "verify",
-              phase: "end",
-              pass: out.pass,
-              errors: out.errors,
-            });
-            return out;
-          },
-        };
+      // 创建独立的 Agent 事件总线
+      const bus = new AgentEventBus();
 
-        // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm 注入用户决策
+      // 全局订阅：所有 Agent 事件实时推送到前端
+      bus.subscribeAll((event) => {
+        send({ type: "agent_event", payload: event });
+      });
+
+      try {
+        // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）
+        const sop = selectSOP(input);
+
+        // LLM 执行器：节点进度经 EventBus 实时推送到前端
+        const executors = createLLMExecutors(bus);
+
+        // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm
+        //（仅含 approve 步骤的 SOP 会调用；game SOP 自动跳过）
         const sessionId = crypto.randomUUID();
         const approver = async (spec: SpecOutput) => {
           send({ type: "approve_needed", sessionId, spec });
           return waitForApproval(sessionId, user.id);
         };
 
-        send({ type: "start", input });
-
-        const { events, finalState, result } = await runPipeline(
+        // 前端按 sop.steps 动态生成阶段卡片（fix 为内部步骤，不下发）
+        const displaySteps = sop.steps
+          .map((s) => s.name)
+          .filter((n) =>
+            ["clarify", "spec", "approve", "generate", "verify", "done"].includes(n),
+          );
+        send({
+          type: "start",
           input,
+          sop: { id: sop.id, name: sop.name, steps: displaySteps },
+        });
+
+        const { finalState, reason, result } = await runSOP(
+          input,
+          sop,
           executors,
           approver,
+          bus,
         );
 
-        // 流水线成功后持久化：项目 + 版本 + 消息，关联当前登录用户
+        // 流水线成功后持久化
         let projectId: string | null = null;
         if (finalState === "done" && result) {
           try {
@@ -172,14 +149,10 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const failEvent = [...events].reverse().find((e) => e.state === "fail");
-        const reason = (failEvent?.payload as { reason?: string } | undefined)
-          ?.reason;
-
         send({
           type: "done",
           finalState,
-          reason: reason ?? null,
+          reason,
           projectId,
           result: result
             ? {

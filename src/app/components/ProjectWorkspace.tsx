@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Project } from "../hooks/useWorkspace";
+import type { ExecutionLog, Project } from "../hooks/useWorkspace";
+import AgentLogPanel from "./AgentLogPanel";
 import VersionCard from "./VersionCard";
 
 interface ProjectWorkspaceProps {
@@ -9,6 +10,7 @@ interface ProjectWorkspaceProps {
   selectedVersionId: number | null;
   awaitingApproval: boolean;
   running: boolean;
+  executionLogs: ExecutionLog[];
   onSelectVersion: (id: number) => void;
   onApprove: () => void;
   onReject: () => void;
@@ -21,6 +23,7 @@ export default function ProjectWorkspace({
   selectedVersionId,
   awaitingApproval,
   running,
+  executionLogs,
   onSelectVersion,
   onApprove,
   onReject,
@@ -46,6 +49,16 @@ export default function ProjectWorkspace({
         ref={listRef}
         className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4"
       >
+        {/* Agent 执行日志队列 */}
+        {executionLogs.length > 0 && (
+          <div className="rounded-lg border border-[#e5e5e5] bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900">
+            <h3 className="mb-2 text-xs font-medium text-neutral-500">
+              Agent 执行队列
+            </h3>
+            <AgentLogPanel logs={executionLogs} />
+          </div>
+        )}
+
         {project.versions.map((version, i) => (
           <div key={version.id} className="flex flex-col gap-2">
             <div className="max-w-[85%] self-end rounded-xl bg-neutral-900 px-3 py-1.5 text-sm whitespace-pre-wrap text-white dark:bg-neutral-100 dark:text-neutral-900">

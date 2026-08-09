@@ -1,7 +1,7 @@
 import type { Executors } from "../agent";
 import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
 import type OpenAI from "openai";
-import { chat, streamGLM } from "@/lib/llm/client";
+import { chat, streamChat, streamGLM } from "@/lib/llm/client";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -193,18 +193,19 @@ export function createLLMExecutors(
           charCount = result.charCount;
           estimatedTokens = result.estimatedTokens;
         } catch (glmErr) {
-          // GLM 失败时降级到百炼（非流式）
+          // GLM 失败时降级到百炼（流式，避免长内容超时）
           console.warn("[GLM Fallback]", glmErr);
           bus?.emit({
             type: "agent:thinking",
             agent: "generate",
             role: "前端工程师",
-            message: "GLM 服务暂不可用，降级到百炼模型...",
+            message: "GLM 服务暂不可用，降级到百炼流式模型...",
           });
-          const response = await chat(MODEL_ROUTING.generate, messages);
-          content = response.choices[0]?.message?.content ?? "";
-          charCount = content.length;
-          estimatedTokens = Math.round(charCount * 0.75);
+          const stream = await streamChat(MODEL_ROUTING.generate, messages);
+          const result = await collectStreamWithProgress(stream, bus);
+          content = result.content;
+          charCount = result.charCount;
+          estimatedTokens = result.estimatedTokens;
         }
 
         let result: GenerateOutput;

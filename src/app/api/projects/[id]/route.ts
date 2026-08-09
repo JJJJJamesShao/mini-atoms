@@ -3,6 +3,9 @@ import { deleteProject, getProject, togglePinProject } from "@/lib/db/projects";
 import { getVersions } from "@/lib/db/versions";
 import { createAuthClient } from "@/lib/supabase/auth-server";
 
+/** 强制 Node.js runtime */
+export const runtime = "nodejs";
+
 const json = (payload: Record<string, unknown>, status = 200) =>
   new Response(JSON.stringify(payload), {
     status,

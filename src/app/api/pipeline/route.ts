@@ -5,6 +5,9 @@ import { runSOP } from "@/lib/agent/engine";
 import { selectSOP } from "@/lib/agent/router";
 import { createRoles } from "@/lib/agent/role";
 import type { File, SpecOutput } from "@/lib/schemas";
+
+/** 强制 Node.js runtime：Edge Runtime 不支持 Buffer 和完整 Supabase 客户端 */
+export const runtime = "nodejs";
 import { createProject } from "@/lib/db/projects";
 import { createVersion, getVersions } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";

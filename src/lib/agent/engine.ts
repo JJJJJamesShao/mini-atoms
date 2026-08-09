@@ -8,6 +8,7 @@
  * - approve 步骤挂起等待注入的 Approver 决策（无 approve 步骤的 SOP 不会调用）。
  */
 
+import type { File } from "../schemas";
 import type { Executors, Approver } from "./index";
 import type { AgentEventBus } from "./bus";
 import { createRoles, ROLES, type Role, type RoleId } from "./role";
@@ -42,6 +43,8 @@ interface ExecutionContext {
   generated: GenerateOutput | null;
   lastErrors: VerifyResult["errors"] | undefined;
   fixAttempts: number;
+  /** 对话迭代时传入的初始代码 */
+  initialFiles?: File[];
 }
 
 /**
@@ -55,6 +58,7 @@ export async function runSOP(
   approver?: Approver,
   bus?: AgentEventBus,
   roles?: Record<RoleId, Role>,
+  initialFiles?: File[],
 ): Promise<SOPRunResult> {
   const runRoles = roles ?? createRoles();
   /** 本次流水线会话 id：Topic 消息按会话隔离历史 */
@@ -67,6 +71,7 @@ export async function runSOP(
     generated: null,
     lastErrors: undefined,
     fixAttempts: 0,
+    initialFiles,
   };
 
   let current: string | undefined = sop.steps[0]?.name;
@@ -214,11 +219,13 @@ async function executeStep(
     }
     case "generate": {
       if (!ctx.spec) throw new Error("generate 步骤缺少 spec 产物");
+      // 对话迭代：传入初始代码（如果有），否则用当前生成产物（fix 模式）
+      const currentFiles = ctx.initialFiles ?? ctx.generated?.files;
       // fix 模式：传入当前代码和 fix 轮次，让 generate 走 patch 编辑而非完整重写
       const out = await executors.generate(
         ctx.spec,
         ctx.lastErrors,
-        ctx.generated?.files,
+        currentFiles,
         ctx.fixAttempts,
       );
       ctx.generated = out;

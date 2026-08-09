@@ -279,6 +279,48 @@ ${formatErrorsForLLM(errors)}
     },
   ];
 }
+// --- follow-up 节点（对话迭代：基于现有代码修改） ---
+
+const SYSTEM_FOLLOW_UP = `你是一位前端工程师，收到了一份现有代码和用户的修改需求。
+
+**你的任务**：基于现有代码进行精确修改，只改动需求相关的部分，保持其他代码完全不变。
+
+**重要规则**：
+1. 使用 Search/Replace 格式输出修改指令
+2. SEARCH 块必须精确匹配原始代码（包括空格、缩进、换行）
+3. 只修改与需求相关的代码，不要改动无关部分
+4. 不要输出任何解释文字，只输出 SEARCH/REPLACE 块
+5. 确保修改后的代码完整可运行
+
+## 输出格式（Search/Replace）
+
+<<<<<<< SEARCH
+[要替换的原始代码]
+=======
+[新代码]
+>>>>>>> REPLACE`;
+
+export function buildFollowUpPrompt(
+  currentHtml: string,
+  request: string,
+): Array<{ role: "system" | "user"; content: string }> {
+  return [
+    { role: "system" as const, content: SYSTEM_FOLLOW_UP },
+    {
+      role: "user" as const,
+      content: `现有代码（${currentHtml.length} 字符）：
+
+${currentHtml}
+
+---
+
+修改需求：${request}
+
+请基于现有代码，使用 Search/Replace 格式输出修改指令。只修改与需求相关的部分。`,
+    },
+  ];
+}
+
 export function buildClassifyPrompt(currentTask: string, newMessage: string) {
   return [
     {

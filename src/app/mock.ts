@@ -19,9 +19,6 @@ export const MOCK_RECENT_PROJECTS: {
   },
 ];
 
-// TODO: 接入 Supabase Auth 后替换为真实用户
-export const MOCK_USER = { name: "James", initials: "J" };
-
 // TODO: 接入主题系统后替换（当前仅展示，不生效）
 export const MOCK_THEMES = ["默认", "深色", "浅色"];
 

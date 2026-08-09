@@ -2,8 +2,12 @@
 
 import type { SpecOutput, VerifyResult } from "../schemas";
 
-const SYSTEM_CLARIFY = `你是一位资深产品经理，擅长将模糊的需求转化为清晰的产品规格。
-你的任务是理解用户的需求，判断是否需要进一步澄清。`;
+const SYSTEM_CLARIFY = `你是一位资深产品经理。判断用户需求是否足够清晰以直接进入规格生成。
+
+判断标准：
+- 如果需求明确（如"做一个待办清单"、"贪吃蛇游戏"、"计时器"），直接返回 ready
+- 只有当需求明显缺失关键信息（如没有说明用途、没有说明目标用户）时才返回 need_clarification
+- 不要过度追问，简单需求应该直接通过`;
 
 const SYSTEM_SPEC = `你是一位技术架构师，擅长将需求拆解为可执行的技术规格。
 你必须严格按照 JSON 格式输出，不要包含任何额外文字。`;
@@ -116,15 +120,11 @@ export function buildGeneratePrompt(
 
 // --- classify 节点（打断机制预留）---
 
-export function buildClassifyPrompt(
-  currentTask: string,
-  newMessage: string,
-) {
+export function buildClassifyPrompt(currentTask: string, newMessage: string) {
   return [
     {
       role: "system" as const,
-      content:
-        "你是一位意图分类助手。判断用户新消息与当前任务的关系。",
+      content: "你是一位意图分类助手。判断用户新消息与当前任务的关系。",
     },
     {
       role: "user" as const,

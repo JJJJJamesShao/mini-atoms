@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import { cannedScenarios } from "@/lib/mock/canned";
-import { MOCK_BUILD_MODES, MOCK_THEMES, MOCK_USER } from "../mock";
+import { getSupabaseBrowser } from "@/lib/supabase/client";
+import { MOCK_BUILD_MODES, MOCK_THEMES } from "../mock";
 
 interface HomeHeroProps {
   /** 返回 false 表示未命中罐头场景，由本组件给出提示 */
@@ -13,6 +15,15 @@ interface HomeHeroProps {
 export default function HomeHero({ onSubmit }: HomeHeroProps) {
   const [draft, setDraft] = useState("");
   const [hint, setHint] = useState<string | null>(null);
+  /** 真实登录状态：null=未登录；string=已登录用户邮箱 */
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    getSupabaseBrowser()
+      .auth.getSession()
+      .then(({ data }) => setUserEmail(data.session?.user.email ?? null))
+      .catch(() => setUserEmail(null));
+  }, []);
 
   const submit = () => {
     const text = draft.trim();
@@ -28,18 +39,35 @@ export default function HomeHero({ onSubmit }: HomeHeroProps) {
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-8 px-6">
-      {/* TODO: 接入 Supabase Auth 后替换为真实头像与用户名 */}
-      <div className="flex items-center gap-2">
-        <span className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-900 text-sm text-white dark:bg-neutral-100 dark:text-neutral-900">
-          {MOCK_USER.initials}
-        </span>
-        <span className="text-sm text-[#525252] dark:text-neutral-400">
-          {MOCK_USER.name}
-        </span>
-      </div>
+      {userEmail ? (
+        <div className="flex items-center gap-2">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-900 text-sm text-white uppercase dark:bg-neutral-100 dark:text-neutral-900">
+            {userEmail[0]}
+          </span>
+          <span className="text-sm text-[#525252] dark:text-neutral-400">
+            {userEmail}
+          </span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-[#a3a3a3]">未登录</span>
+          <Link
+            href="/auth/login"
+            className="rounded-lg border border-[#e5e5e5] px-3 py-1 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+          >
+            登录
+          </Link>
+          <Link
+            href="/auth/register"
+            className="rounded-lg bg-neutral-900 px-3 py-1 text-white transition-colors hover:bg-neutral-700 dark:bg-neutral-100 dark:text-neutral-900"
+          >
+            注册
+          </Link>
+        </div>
+      )}
 
       <h1 className="text-3xl font-bold tracking-tight">
-        你想创造什么，{MOCK_USER.name}？
+        你想创造什么{userEmail ? `，${userEmail}` : ""}？
       </h1>
 
       <div className="w-full max-w-xl">

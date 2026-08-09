@@ -1,5 +1,8 @@
 "use client";
 
+// TODO: 本 hook 是 /api/pipeline 的 SSE 客户端，尚未接入 UI
+// （当前 page.tsx 仍使用 useWorkspace + 罐头执行器）；接入后替换 useWorkspace。
+
 import { useCallback, useRef, useState } from "react";
 import type { SpecOutput } from "@/lib/schemas";
 
@@ -158,7 +161,8 @@ export function usePipeline() {
           } else if (state === "done") {
             setStage("done", "done");
           } else if (state === "fail") {
-            const reason = (payload as Record<string, unknown>)?.reason as string;
+            const reason = (payload as Record<string, unknown>)
+              ?.reason as string;
             pushMessage(
               "assistant",
               reason === "spec_rejected"

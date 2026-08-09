@@ -2,9 +2,41 @@
 
 一个智能体驱动的应用生成 Demo：用户用自然语言描述需求，系统通过「需求澄清 → 规格确认 → 代码生成 → 自动校验 → 沙箱预览」的多阶段 Agent 流水线，实时生成可交互的网页应用，支持对话式迭代与版本管理。
 
-**技术栈**：Next.js · TypeScript · Supabase · Tailwind CSS · GLM
+**技术栈**：Next.js · TypeScript · Supabase · Tailwind CSS · 百炼 Qwen
 
 > **架构设计**：数据模型按多文件项目预留（`File[]` 数组），当前阶段生成单文件 HTML，接口支持未来扩展。
+
+---
+
+## 快速开始
+
+### 环境变量（`.env.local`）
+
+```bash
+# Supabase（持久化 + Auth）
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_URL=
+SUPABASE_SECRET_KEY=
+
+# 百炼 Qwen（OpenAI 兼容端点）
+ANTHROPIC_AUTH_TOKEN=
+ANTHROPIC_BASE_URL=
+```
+
+### 本地运行
+
+```bash
+npm install
+npm run dev
+```
+
+### 测试
+
+```bash
+./verify.sh                    # lint + tsc + 单元测试 + 生产构建
+npx tsx src/scripts/test_llm.ts  # LLM 链路测试（真实调用百炼 API）
+```
 
 ---
 

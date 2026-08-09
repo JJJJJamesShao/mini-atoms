@@ -15,7 +15,14 @@ interface AgentLogPanelProps {
   logs: ExecutionLog[];
 }
 
-/** Agent 执行日志面板：实时展示各 Agent 节点的消息队列 */
+/** 
+ * Agent 执行日志面板：按阶段分组展示，去重显示
+ * 
+ * 设计原则：
+ * - 每个阶段只显示一次（最新状态），避免"产品经理正在执行"+"产品经理已完成"的重复感
+ * - generate 阶段展示文件级产出（index.html, game.js 等）
+ * - 其他阶段展示状态流转
+ */
 export default function AgentLogPanel({ logs }: AgentLogPanelProps) {
   if (logs.length === 0) {
     return (
@@ -25,9 +32,20 @@ export default function AgentLogPanel({ logs }: AgentLogPanelProps) {
     );
   }
 
+  // 按阶段分组，每组只保留最新的一条
+  const latestByStage = new Map<string, ExecutionLog>();
+  for (const log of logs) {
+    latestByStage.set(log.stage, log);
+  }
+
+  // 按时间排序
+  const groupedLogs = Array.from(latestByStage.values()).sort(
+    (a, b) => a.timestamp - b.timestamp
+  );
+
   return (
     <div className="space-y-1.5 max-h-64 overflow-y-auto">
-      {logs.map((log) => {
+      {groupedLogs.map((log) => {
         const label = AGENT_LABELS[log.stage];
         const time = new Date(log.timestamp).toLocaleTimeString("zh-CN", {
           hour: "2-digit",
@@ -35,14 +53,26 @@ export default function AgentLogPanel({ logs }: AgentLogPanelProps) {
           second: "2-digit",
         });
 
+        // 判断状态图标
+        let statusIcon = "○";
+        let statusClass = "text-neutral-400";
+        if (log.phase === "start") {
+          statusIcon = "▶";
+          statusClass = "text-blue-500 animate-pulse";
+        } else if (log.phase === "end") {
+          statusIcon = "✓";
+          statusClass = "text-green-500";
+        } else if (log.phase === "progress") {
+          statusIcon = "⟳";
+          statusClass = "text-blue-400";
+        }
+
         return (
           <div
-            key={log.id}
-            className={`flex items-center gap-2 rounded-lg px-2 py-1 text-xs transition-all ${
-              log.phase === "start" ? "animate-pulse bg-blue-50 dark:bg-blue-950/20" : ""
-            }`}
+            key={log.stage}
+            className="flex items-center gap-2 rounded-lg px-2 py-1 text-xs transition-all hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
           >
-            <span className="shrink-0 text-neutral-400 font-mono">{time}</span>
+            <span className="shrink-0 text-neutral-400 font-mono text-[10px]">{time}</span>
             <span
               className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${
                 label?.color ?? "bg-neutral-100 text-neutral-600"
@@ -50,11 +80,9 @@ export default function AgentLogPanel({ logs }: AgentLogPanelProps) {
             >
               {label?.name ?? log.stage}
             </span>
-            <span className="text-neutral-500">
-              {log.phase === "start" ? "▶" : log.phase === "end" ? "✓" : "⟳"}
-            </span>
+            <span className={`${statusClass} font-bold`}>{statusIcon}</span>
             {log.detail && (
-              <span className="truncate text-neutral-400">{log.detail}</span>
+              <span className="truncate text-neutral-500">{log.detail}</span>
             )}
           </div>
         );

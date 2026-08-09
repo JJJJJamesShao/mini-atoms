@@ -16,7 +16,7 @@ import { MessageTopic, type TypedMessage } from "./message";
 
 export interface AgentEvent {
   /** 事件类型 */
-  type: "agent:start" | "agent:thinking" | "agent:progress" | "agent:complete" | "agent:error";
+  type: "agent:start" | "agent:thinking" | "agent:progress" | "agent:complete" | "agent:error" | "file:generated";
   /** Agent 名称（clarify/spec/generate/verify/fix） */
   agent: string;
   /** Agent 角色描述 */

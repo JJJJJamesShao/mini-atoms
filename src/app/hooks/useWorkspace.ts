@@ -253,6 +253,12 @@ export function useWorkspace() {
             setStage(agentStage, "failed", ae.message ?? "执行出错");
             return;
           }
+
+          if (ae.type === "file:generated") {
+            const file = ae.output as { path: string; size: number } | undefined;
+            pushLog(agentStage, "progress", `📄 ${file?.path ?? "文件"}（${file?.size ?? 0} 字符）`);
+            return;
+          }
         } else if (type === "approve_needed") {
           approvalSessionId.current = event.sessionId as string;
           updateVersion(id, (v) => ({ ...v, spec: event.spec as SpecOutput, status: "awaiting" }));

@@ -198,12 +198,24 @@ export function createLLMExecutors(
         }
 
         memory.generate.add({ topic: MessageTopic.CODE, content: JSON.stringify(result), metadata: { direction: "out" } });
+
+        // 发出文件级事件，供 UI 展示文件变更
+        for (const file of result.files) {
+          bus?.emit({
+            type: "file:generated",
+            agent: "generate",
+            role: "前端工程师",
+            message: `${file.path}（${file.content.length} 字符）`,
+            output: { path: file.path, size: file.content.length },
+          });
+        }
+
         emit({
           type: "agent:complete",
           agent: "generate",
           role: "前端工程师",
           output: result,
-          message: `生成完成：${charCount} 字符（约 ${estimatedTokens} tokens）`,
+          message: `生成完成：${result.files.length} 个文件，${charCount} 字符`,
         });
         return result;
       } catch (err) {

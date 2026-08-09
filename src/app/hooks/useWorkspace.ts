@@ -229,12 +229,41 @@ export function useWorkspace() {
             role?: string;
             message?: string;
             percent?: number;
+            output?: unknown;
           };
-          if (ae.agent === "generate") {
-            const msg = ae.message || (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
-            setStage("generate", "active", msg);
-            // 将 thinking/progress 事件也记入日志
-            pushLog("generate", "progress", msg);
+          
+          // 处理所有 Agent 的 start/complete 事件，映射为 stage 状态
+          if (ae.type === "agent:start") {
+            const stage = ae.agent as StageName;
+            if (STAGE_ORDER.includes(stage)) {
+              setStage(stage, "active", ae.role);
+              pushLog(stage, "start", ae.role);
+            }
+          } else if (ae.type === "agent:complete") {
+            const stage = ae.agent as StageName;
+            if (stage === "clarify") {
+              setStage("clarify", "done", "需求已澄清");
+            } else if (stage === "spec") {
+              const spec = ae.output as SpecOutput | undefined;
+              setStage(
+                "spec",
+                "done",
+                spec
+                  ? `${spec.requirements.length} 条需求 / ${spec.constraints.length} 条约束`
+                  : "规格已生成",
+              );
+            } else if (stage === "generate") {
+              setStage("generate", "done", ae.message || "代码已生成");
+            } else if (stage === "verify") {
+              setStage("verify", "done", "校验通过");
+            }
+            pushLog(stage, "end", ae.message);
+          } else if (ae.type === "agent:thinking" || ae.type === "agent:progress") {
+            if (ae.agent === "generate") {
+              const msg = ae.message || (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
+              setStage("generate", "active", msg);
+              pushLog("generate", "progress", msg);
+            }
           }
         } else if (type === "approve_needed") {
           approvalSessionId.current = event.sessionId as string;

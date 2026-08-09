@@ -2,6 +2,7 @@ import type { Executors } from "../agent";
 import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
 import type OpenAI from "openai";
 import { chat, streamChat } from "@/lib/llm/client";
+import { glmStreamChat, glmChat } from "@/lib/llm/glm-client";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -135,9 +136,8 @@ export function createLLMExecutors(bus?: AgentEventBus): Executors {
 
       try {
         const messages = buildGeneratePrompt(spec, errors);
-        // 使用 flash 模型提升速度（3.8-max 太慢，会卡住 3-4 分钟）
-        const config = { ...MODEL_ROUTING.generate, model: "qwen3.6-flash", maxTokens: 4096 };
-        const stream = await streamChat(config, messages);
+        // 使用 GLM 5.2 保证代码质量
+        const stream = await glmStreamChat("glm-5.2", messages, 4096);
         
         // 实时收集 + 进度推送
         const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);

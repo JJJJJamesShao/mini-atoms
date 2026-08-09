@@ -222,6 +222,16 @@ export function useWorkspace() {
                 : errors?.map((e) => `${e.rule}: ${e.message}`).join("；"),
             );
           }
+        } else if (type === "agent_event") {
+          const ae = event.payload as {
+            type: string;
+            agent: string;
+            role?: string;
+            message?: string;
+          };
+          if (ae.type === "agent:thinking" && ae.agent === "generate") {
+            setStage("generate", "active", ae.message || "正在生成代码...");
+          }
         } else if (type === "approve_needed") {
           approvalSessionId.current = event.sessionId as string;
           updateVersion(id, (v) => ({

@@ -1,6 +1,9 @@
 import { config } from "dotenv";
 config({ path: ".env.local" });
 import OpenAI from "openai";
+import { chat } from "../lib/llm/client";
+import { MODEL_ROUTING } from "../lib/llm/models";
+import { buildClarifyPrompt } from "../lib/llm/prompts";
 
 const client = new OpenAI({
   apiKey: process.env.ANTHROPIC_AUTH_TOKEN!,
@@ -56,6 +59,24 @@ async function test() {
     if (match) {
       console.log("提取后:", JSON.parse(match[1].trim()));
     }
+  }
+
+  console.log("\n=== 测试 4: clarify 简单需求直接通过（任务 1） ===");
+  const simpleInputs = ["做一个待办清单", "贪吃蛇游戏", "计时器"];
+  for (const input of simpleInputs) {
+    const resp = await chat(MODEL_ROUTING.clarify, buildClarifyPrompt(input));
+    const text = resp.choices[0]?.message?.content ?? "";
+    let parsed: { status?: string };
+    try {
+      const block = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+      parsed = JSON.parse(block ? block[1].trim() : text);
+    } catch {
+      throw new Error(`${input} 输出无法解析为 JSON: ${text.slice(0, 200)}`);
+    }
+    if (parsed.status !== "ready") {
+      throw new Error(`${input} 应直接通过 ready，实际: ${parsed.status}`);
+    }
+    console.log(`✓ ${input} → ready`);
   }
 
   console.log("\n=== 全部测试通过 ===");

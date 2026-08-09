@@ -2,7 +2,6 @@ import type { Executors } from "../agent";
 import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
 import type OpenAI from "openai";
 import { chat, streamChat } from "@/lib/llm/client";
-import { glmStreamChat, glmChat } from "@/lib/llm/glm-client";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -136,8 +135,9 @@ export function createLLMExecutors(bus?: AgentEventBus): Executors {
 
       try {
         const messages = buildGeneratePrompt(spec, errors);
-        // 使用 GLM 5.2 保证代码质量
-        const stream = await glmStreamChat("glm-5.2", messages, 4096);
+        // 使用百炼 GLM 5.2 保证代码质量
+        const config = { ...MODEL_ROUTING.generate, model: "glm-5.2", maxTokens: 4096 };
+        const stream = await streamChat(config, messages);
         
         // 实时收集 + 进度推送
         const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);

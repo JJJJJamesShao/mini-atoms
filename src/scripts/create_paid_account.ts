@@ -22,18 +22,26 @@ async function main() {
     email_confirm: true,
   });
 
+  let userId: string;
   if (error) {
-    if (error.message.includes("User already registered")) {
-      console.log("账号已存在，跳过创建");
-      return;
-    }
-    throw error;
+    // GoTrue 已注册错误：code = "email_exists"（message 措辞随版本变化，不依赖）
+    if ((error as { code?: string }).code !== "email_exists") throw error;
+    // 账号已存在（如先经 /auth/register 注册）：查到 user id 后继续提权
+    console.log("账号已存在，直接设置 paid 角色");
+    const { data: list, error: listError } =
+      await supabase.auth.admin.listUsers({ perPage: 1000 });
+    if (listError) throw listError;
+    const existing = list.users.find((u) => u.email === email);
+    if (!existing) throw new Error(`已注册但按邮箱未找到用户: ${email}`);
+    userId = existing.id;
+  } else {
+    userId = data.user.id;
   }
 
-  await setUserRole(data.user.id, "paid");
-  const role = await getUserRole(data.user.id);
+  await setUserRole(userId, "paid");
+  const role = await getUserRole(userId);
   if (role !== "paid") throw new Error(`角色校验失败: ${role}`);
-  console.log(`paid 账号创建成功: ${email}（角色已验证为 paid）`);
+  console.log(`paid 账号就绪: ${email}（角色已验证为 paid）`);
 }
 
 main().catch((e) => {

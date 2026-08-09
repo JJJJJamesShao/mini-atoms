@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
-import { runPipeline, type Executors } from "@/lib/agent";
 import { createLLMExecutors } from "@/lib/agent/llm-executors";
 import { AgentEventBus } from "@/lib/agent/bus";
+import { runSOP } from "@/lib/agent/engine";
+import { selectSOP } from "@/lib/agent/router";
 import type { SpecOutput } from "@/lib/schemas";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
@@ -30,10 +31,9 @@ const jsonError = (status: number, payload: Record<string, unknown>) =>
  * 流程：
  * 1. 鉴权：未登录 401
  * 2. RBAC：角色从 profiles 表读取，免费账号额度 0 → 403；超限 → 429
- * 3. 创建 Agent EventBus，实时推送各 Agent 事件
- * 4. 运行流水线，SSE 实时推送阶段事件 + Agent 中间进度
- * 5. approve 阶段挂起，等待前端经 /api/pipeline/confirm 注入用户决策
- * 6. 成功后持久化项目/版本/消息并关联 user_id
+ * 3. SOP 路由（selectSOP）+ runSOP 引擎执行，SSE 实时推送 Agent 事件
+ * 4. approve 阶段挂起（仅含确认门的 SOP），等待 /api/pipeline/confirm 注入决策
+ * 5. 成功后持久化项目/版本/消息并关联 user_id
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
@@ -92,28 +92,38 @@ export async function POST(req: NextRequest) {
       });
 
       try {
-        // 包装 LLM 执行器：接入 EventBus
-        const base = createLLMExecutors(bus);
-        const executors: Executors = {
-          clarify: base.clarify,
-          spec: base.spec,
-          generate: base.generate,
-          verify: base.verify,
-        };
+        // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）
+        const sop = selectSOP(input);
+
+        // LLM 执行器：节点进度经 EventBus 实时推送到前端
+        const executors = createLLMExecutors(bus);
 
         // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm
+        //（仅含 approve 步骤的 SOP 会调用；game SOP 自动跳过）
         const sessionId = crypto.randomUUID();
         const approver = async (spec: SpecOutput) => {
           send({ type: "approve_needed", sessionId, spec });
           return waitForApproval(sessionId, user.id);
         };
 
-        send({ type: "start", input });
-
-        const { events, finalState, result } = await runPipeline(
+        // 前端按 sop.steps 动态生成阶段卡片（fix 为内部步骤，不下发）
+        const displaySteps = sop.steps
+          .map((s) => s.name)
+          .filter((n) =>
+            ["clarify", "spec", "approve", "generate", "verify", "done"].includes(n),
+          );
+        send({
+          type: "start",
           input,
+          sop: { id: sop.id, name: sop.name, steps: displaySteps },
+        });
+
+        const { finalState, reason, result } = await runSOP(
+          input,
+          sop,
           executors,
           approver,
+          bus,
         );
 
         // 流水线成功后持久化
@@ -139,14 +149,10 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const failEvent = [...events].reverse().find((e) => e.state === "fail");
-        const reason = (failEvent?.payload as { reason?: string } | undefined)
-          ?.reason;
-
         send({
           type: "done",
           finalState,
-          reason: reason ?? null,
+          reason,
           projectId,
           result: result
             ? {

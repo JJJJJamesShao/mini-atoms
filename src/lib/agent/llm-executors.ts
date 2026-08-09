@@ -9,7 +9,7 @@ import {
   buildSpecPrompt,
 } from "@/lib/llm/prompts";
 import { verifyProject } from "../verify";
-import type { AgentEventBus } from "./bus";
+import type { AgentEvent, AgentEventBus } from "./bus";
 
 /**
  * 实时收集流式响应，同时 emit 进度事件
@@ -98,8 +98,8 @@ function extractHtml(text: string): string {
  * @param bus - 事件总线，用于 emit 中间进度事件
  */
 export function createLLMExecutors(bus?: AgentEventBus): Executors {
-  const emit = (event: { type: string; agent: string; role?: string; input?: unknown; output?: unknown; message?: string; percent?: number }) => {
-    bus?.emit(event as any);
+  const emit = (event: Omit<AgentEvent, "timestamp">) => {
+    bus?.emit(event);
   };
 
   return {

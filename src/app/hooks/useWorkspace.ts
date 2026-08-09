@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { getCannedScenario } from "@/lib/mock/canned";
 import type { SpecOutput } from "@/lib/schemas";
 
-/** 执行日志展示的阶段（fix 为内部重试，不单独列出） */
+/** 阶段全集与默认值（完整 web-app 流程）；实际版本的阶段由服务端 SOP 动态下发（fix 为内部步骤，不展示） */
 export const STAGE_ORDER = [
   "clarify",
   "spec",
@@ -88,6 +88,8 @@ export function useWorkspace() {
   const activeVersionId = useRef<number | null>(null);
   /** 当前挂起审批的会话 id（服务端确认门凭证） */
   const approvalSessionId = useRef<string | null>(null);
+  /** 当前运行版本的阶段列表（由服务端 SOP 动态下发，默认完整流程） */
+  const activeStages = useRef<readonly string[]>(STAGE_ORDER);
 
   const updateVersion = useCallback(
     (id: number, fn: (v: Version) => Version) => {
@@ -108,6 +110,7 @@ export function useWorkspace() {
       const id = ++versionId.current;
       activeVersionId.current = id;
       approvalSessionId.current = null;
+      activeStages.current = STAGE_ORDER;
 
       const title =
         request.length > 30 ? `${request.slice(0, 30)}…` : request;
@@ -183,6 +186,28 @@ export function useWorkspace() {
           }));
         };
 
+        if (type === "start") {
+          // 服务端 SOP 路由结果：动态生成阶段卡片，版本标题标注 SOP 名称
+          const sop = event.sop as
+            | { id: string; name: string; steps: string[] }
+            | undefined;
+          if (sop) {
+            const steps = sop.steps.filter((s): s is StageName =>
+              (STAGE_ORDER as readonly string[]).includes(s),
+            );
+            activeStages.current = steps;
+            updateVersion(id, (v) => ({
+              ...v,
+              scenarioTitle: `【${sop.name}】${v.scenarioTitle}`,
+              stages: steps.map((stage) => ({
+                stage,
+                status: "pending" as const,
+              })),
+            }));
+          }
+          return;
+        }
+
         if (type === "agent_event") {
           const ae = event.payload as {
             type: string;
@@ -194,13 +219,13 @@ export function useWorkspace() {
           };
           const agentStage = ae.agent as StageName;
 
-          if (ae.type === "agent:start" && STAGE_ORDER.includes(agentStage)) {
+          if (ae.type === "agent:start" && activeStages.current.includes(agentStage)) {
             setStage(agentStage, "active", ae.role);
             pushLog(agentStage, "start", ae.role);
             return;
           }
 
-          if (ae.type === "agent:complete" && STAGE_ORDER.includes(agentStage)) {
+          if (ae.type === "agent:complete" && activeStages.current.includes(agentStage)) {
             pushLog(agentStage, "end", ae.message);
             if (agentStage === "clarify") {
               const out = ae.output as { summary?: string } | undefined;

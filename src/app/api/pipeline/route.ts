@@ -1,12 +1,14 @@
 import { NextRequest } from "next/server";
-import { runPipeline } from "@/lib/agent";
+import { runPipeline, type Executors } from "@/lib/agent";
 import { createLLMExecutors } from "@/lib/agent/llm-executors";
+import type { SpecOutput } from "@/lib/schemas";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
 import { getUserRole, type UserRole } from "@/lib/db/profiles";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { createAuthClient } from "@/lib/supabase/auth-server";
+import { waitForApproval } from "./gate";
 
 /** 各角色每日 LLM 生成额度：free=0（仅罐头演示），paid 暂不限量 */
 const DAILY_QUOTA: Record<UserRole, number> = {
@@ -27,8 +29,9 @@ const jsonError = (status: number, payload: Record<string, unknown>) =>
  * 流程：
  * 1. 鉴权：未登录 401
  * 2. RBAC：角色从 profiles 表读取，免费账号额度 0 → 403；超限 → 429
- * 3. 运行流水线，SSE 流式返回阶段事件
- * 4. 成功后持久化项目/版本/消息并关联 user_id
+ * 3. 运行流水线，SSE 实时推送各节点开始/结束事件
+ * 4. approve 阶段挂起，等待前端经 /api/pipeline/confirm 注入用户决策
+ * 5. 成功后持久化项目/版本/消息并关联 user_id
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
@@ -79,14 +82,63 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        const executors = createLLMExecutors();
+        // 包装 LLM 执行器：节点开始/结束时实时推送阶段事件，
+        // 否则事件要等 runPipeline 返回后才有，approve 确认门会死锁
+        const base = createLLMExecutors();
+        const executors: Executors = {
+          clarify: async (inp) => {
+            send({ type: "stage", state: "clarify", phase: "start" });
+            const out = await base.clarify(inp);
+            send({
+              type: "stage",
+              state: "clarify",
+              phase: "end",
+              summary: out.summary,
+              needClarification: out.status === "need_clarification",
+            });
+            return out;
+          },
+          spec: async (c) => {
+            send({ type: "stage", state: "spec", phase: "start" });
+            const out = await base.spec(c);
+            send({ type: "stage", state: "spec", phase: "end", spec: out });
+            return out;
+          },
+          generate: async (s, errors) => {
+            send({
+              type: "stage",
+              state: "generate",
+              phase: "start",
+              isRetry: Boolean(errors?.length),
+            });
+            const out = await base.generate(s, errors);
+            send({
+              type: "stage",
+              state: "generate",
+              phase: "end",
+              notes: out.notes,
+            });
+            return out;
+          },
+          verify: async (files) => {
+            send({ type: "stage", state: "verify", phase: "start" });
+            const out = await base.verify(files);
+            send({
+              type: "stage",
+              state: "verify",
+              phase: "end",
+              pass: out.pass,
+              errors: out.errors,
+            });
+            return out;
+          },
+        };
 
-        // approve 确认门：在当前实现中自动通过
-        // TODO: 接入前端确认门后，改为等待用户确认
-        const approver = async () => {
-          send({ type: "approve_needed", spec: null });
-          // 当前 demo 阶段自动通过，后续接入前端确认
-          return true;
+        // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm 注入用户决策
+        const sessionId = crypto.randomUUID();
+        const approver = async (spec: SpecOutput) => {
+          send({ type: "approve_needed", sessionId, spec });
+          return waitForApproval(sessionId, user.id);
         };
 
         send({ type: "start", input });
@@ -96,11 +148,6 @@ export async function POST(req: NextRequest) {
           executors,
           approver,
         );
-
-        // 推送所有事件
-        for (const event of events) {
-          send({ type: "stage", ...event });
-        }
 
         // 流水线成功后持久化：项目 + 版本 + 消息，关联当前登录用户
         let projectId: string | null = null;
@@ -125,9 +172,14 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        const failEvent = [...events].reverse().find((e) => e.state === "fail");
+        const reason = (failEvent?.payload as { reason?: string } | undefined)
+          ?.reason;
+
         send({
           type: "done",
           finalState,
+          reason: reason ?? null,
           projectId,
           result: result
             ? {

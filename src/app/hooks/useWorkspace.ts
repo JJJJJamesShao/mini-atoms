@@ -1,8 +1,6 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { runPipeline, type Executors } from "@/lib/agent";
-import { createCannedExecutors } from "@/lib/agent/canned-executors";
 import { getCannedScenario } from "@/lib/mock/canned";
 import type { SpecOutput } from "@/lib/schemas";
 
@@ -46,23 +44,25 @@ export interface Project {
   versions: Version[];
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 const initialStages = (): StageItem[] =>
   STAGE_ORDER.map((stage) => ({ stage, status: "pending" as const }));
 
-/** 演示阶段的关键词路由：自由文本 → 罐头场景（TODO: 接入真实 LLM 后移除） */
-function matchScenarioId(text: string): string | null {
-  const t = text.toLowerCase();
-  if (text.includes("待办") || t.includes("todo")) return "todo";
-  if (text.includes("蛇") || t.includes("snake")) return "snake";
-  if (text.includes("计时") || t.includes("timer")) return "timer";
-  return null;
+/** 失败原因 → 用户可读文案 */
+function failReasonText(reason: string | null): string {
+  switch (reason) {
+    case "spec_rejected":
+      return "规格被拒绝，请重新描述需求。";
+    case "need_clarification":
+      return "需求信息不足，请补充更多细节后重试。";
+    default:
+      return "生成校验多次未通过，请换个描述重试。";
+  }
 }
 
 /**
  * 工作区状态管理：项目 + 多版本。
- * 每个版本对应一次 runPipeline 运行，approve 确认门挂起等待用户决策。
+ * 每个版本对应一次 /api/pipeline SSE 运行，approve 确认门经
+ * /api/pipeline/confirm 注入用户决策。Sidebar 罐头演示仍走本地数据（零成本）。
  */
 export function useWorkspace() {
   const [project, setProject] = useState<Project | null>(null);
@@ -73,9 +73,9 @@ export function useWorkspace() {
   const [running, setRunning] = useState(false);
 
   const versionId = useRef(0);
-  const lastScenarioId = useRef<string>("todo");
   const activeVersionId = useRef<number | null>(null);
-  const approveResolver = useRef<((ok: boolean) => void) | null>(null);
+  /** 当前挂起审批的会话 id（服务端确认门凭证） */
+  const approvalSessionId = useRef<string | null>(null);
 
   const updateVersion = useCallback(
     (id: number, fn: (v: Version) => Version) => {
@@ -92,17 +92,17 @@ export function useWorkspace() {
   );
 
   const runVersion = useCallback(
-    async (request: string, scenarioId: string, freshProject: boolean) => {
-      const scenario = getCannedScenario(scenarioId);
-      if (!scenario) return;
-      lastScenarioId.current = scenarioId;
-
+    async (request: string, freshProject: boolean) => {
       const id = ++versionId.current;
       activeVersionId.current = id;
+      approvalSessionId.current = null;
+
+      const title =
+        request.length > 30 ? `${request.slice(0, 30)}…` : request;
       const version: Version = {
         id,
         request,
-        scenarioTitle: scenario.title,
+        scenarioTitle: title,
         status: "running",
         stages: initialStages(),
         spec: null,
@@ -112,7 +112,7 @@ export function useWorkspace() {
       setProject((prev) =>
         prev && !freshProject
           ? { ...prev, versions: [...prev.versions, version] }
-          : { title: scenario.title, versions: [version] },
+          : { title, versions: [version] },
       );
       setSelectedVersionId(id);
       setRunning(true);
@@ -132,150 +132,176 @@ export function useWorkspace() {
           ),
         }));
 
-      // 包装罐头执行器：节点调用 → 版本内执行日志，加延时让阶段逐个点亮
-      const base = createCannedExecutors(scenarioId);
-      const wrapped: Executors = {
-        clarify: async (inp) => {
-          setStage("clarify", "active");
-          await sleep(500);
-          const out = await base.clarify(inp);
-          setStage("clarify", "done", out.summary);
-          return out;
-        },
-        spec: async (c) => {
-          setStage("spec", "active");
-          await sleep(500);
-          const out = await base.spec(c);
-          setStage(
-            "spec",
-            "done",
-            `${out.requirements.length} 条需求 / ${out.constraints.length} 条约束 / ${out.userStories.length} 条用户故事`,
-          );
-          return out;
-        },
-        generate: async (s, errors) => {
-          setStage("generate", "active");
-          if (errors?.length) {
-            setStage(
-              "generate",
-              "active",
-              `校验未通过，自动修复重试（${errors[0].rule}）`,
-            );
-          }
-          await sleep(700);
-          const out = await base.generate(s, errors);
-          setStage("generate", "done", out.notes);
-          return out;
-        },
-        verify: async (files) => {
-          setStage("verify", "active");
-          await sleep(500);
-          const out = await base.verify(files);
-          setStage(
-            "verify",
-            out.pass ? "done" : "failed",
-            out.pass
-              ? "语法与结构校验通过"
-              : out.errors.map((e) => `${e.rule}: ${e.message}`).join("；"),
-          );
-          return out;
-        },
-      };
-
-      // approve 确认门：挂起流水线，直到用户点击「确认」/「修改」
-      const approver = async (specOut: SpecOutput) => {
-        updateVersion(id, (v) => ({ ...v, spec: specOut, status: "awaiting" }));
-        setStage("approve", "active");
-        setAwaitingApproval(true);
-        return new Promise<boolean>((resolve) => {
-          approveResolver.current = resolve;
-        });
-      };
-
-      try {
-        const { events, finalState, result } = await runPipeline(
-          request,
-          wrapped,
-          approver,
-        );
-
-        if (finalState === "done" && result) {
-          setStage("done", "done", `${result.files.length} 个文件`);
-          const html =
-            result.files.find((f) => f.path === "index.html") ??
-            result.files[0];
-          updateVersion(id, (v) => ({
-            ...v,
-            status: "done",
-            html: html.content,
-            note: result.notes,
-          }));
-        } else {
-          const failEvent = [...events]
-            .reverse()
-            .find((e) => e.state === "fail");
-          const reason = (failEvent?.payload as { reason?: string } | undefined)
-            ?.reason;
-          updateVersion(id, (v) => ({
-            ...v,
-            status: "failed",
-            stages: v.stages.map((s) =>
-              s.status === "active" ? { ...s, status: "failed" } : s,
-            ),
-            note:
-              reason === "spec_rejected"
-                ? "规格被拒绝，请重新描述需求。"
-                : reason === "need_clarification"
-                  ? "需求信息不足，请补充更多细节后重试。"
-                  : "生成校验多次未通过，请换个描述重试。",
-          }));
-        }
-      } catch (err) {
+      const failVersion = (note: string) =>
         updateVersion(id, (v) => ({
           ...v,
           status: "failed",
-          note: `流水线执行出错：${err instanceof Error ? err.message : String(err)}`,
+          stages: v.stages.map((s) =>
+            s.status === "active" ? { ...s, status: "failed" } : s,
+          ),
+          note,
         }));
+
+      const handleEvent = (event: Record<string, unknown>) => {
+        const type = event.type as string;
+
+        if (type === "stage") {
+          const state = event.state as StageName;
+          if (!STAGE_ORDER.includes(state)) return;
+
+          if (event.phase === "start") {
+            setStage(
+              state,
+              "active",
+              event.isRetry ? "校验未通过，自动修复重试" : undefined,
+            );
+            return;
+          }
+
+          // phase === "end"
+          if (state === "clarify") {
+            setStage("clarify", "done", event.summary as string);
+          } else if (state === "spec") {
+            const spec = event.spec as SpecOutput | undefined;
+            setStage(
+              "spec",
+              "done",
+              spec
+                ? `${spec.requirements.length} 条需求 / ${spec.constraints.length} 条约束 / ${spec.userStories.length} 条用户故事`
+                : undefined,
+            );
+          } else if (state === "generate") {
+            setStage("generate", "done", event.notes as string);
+          } else if (state === "verify") {
+            const pass = event.pass as boolean;
+            const errors = event.errors as
+              | { rule: string; message: string }[]
+              | undefined;
+            setStage(
+              "verify",
+              pass ? "done" : "failed",
+              pass
+                ? "语法与结构校验通过"
+                : errors?.map((e) => `${e.rule}: ${e.message}`).join("；"),
+            );
+          }
+        } else if (type === "approve_needed") {
+          approvalSessionId.current = event.sessionId as string;
+          updateVersion(id, (v) => ({
+            ...v,
+            spec: event.spec as SpecOutput,
+            status: "awaiting",
+          }));
+          setStage("approve", "active");
+          setAwaitingApproval(true);
+        } else if (type === "done") {
+          const result = event.result as {
+            files: { path: string; content: string }[];
+            notes: string;
+          } | null;
+
+          if (event.finalState === "done" && result) {
+            setStage("done", "done", `${result.files.length} 个文件`);
+            const html =
+              result.files.find((f) => f.path === "index.html") ??
+              result.files[0];
+            updateVersion(id, (v) => ({
+              ...v,
+              status: "done",
+              html: html.content,
+              note: result.notes,
+            }));
+          } else {
+            failVersion(failReasonText(event.reason as string | null));
+          }
+        } else if (type === "persist_error") {
+          updateVersion(id, (v) => ({
+            ...v,
+            note: `${v.note ?? ""}（保存到云端失败：${event.message}）`,
+          }));
+        } else if (type === "error") {
+          failVersion(`服务端错误：${event.message}`);
+        }
+      };
+
+      try {
+        const response = await fetch("/api/pipeline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ input: request }),
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
+          throw new Error(
+            (data as { message?: string } | null)?.message ??
+              `请求失败（HTTP ${response.status}）`,
+          );
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("响应体为空");
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data: ")) continue;
+            try {
+              handleEvent(JSON.parse(trimmed.slice(6)));
+            } catch {
+              // 忽略解析失败的行
+            }
+          }
+        }
+      } catch (err) {
+        failVersion(
+          err instanceof Error ? err.message : `请求出错：${String(err)}`,
+        );
       } finally {
         setRunning(false);
         setAwaitingApproval(false);
         activeVersionId.current = null;
-        approveResolver.current = null;
+        approvalSessionId.current = null;
       }
     },
     [updateVersion],
   );
 
-  /** 首页发起新项目；返回 false 表示未命中罐头场景（调用方给提示） */
+  /** 首页发起新项目：任何输入都直接交给后端 LLM 处理 */
   const startProject = useCallback(
     (request: string): boolean => {
       if (running) return false;
-      const scenarioId = matchScenarioId(request);
-      if (!scenarioId) return false;
-      void runVersion(request, scenarioId, true);
+      void runVersion(request, true);
       return true;
     },
     [running, runVersion],
   );
 
-  /** 工作区内追加输入 → 新版本。未命中场景关键词时复用当前场景（mock 修改） */
+  /** 工作区内追加输入 → 调 API 生成新版本 */
   const sendFollowUp = useCallback(
     (request: string) => {
       if (running || !project) return;
-      // TODO: 接入真实 LLM 后，修改类需求应真实重新生成，而非复用罐头产物
-      const scenarioId = matchScenarioId(request) ?? lastScenarioId.current;
-      void runVersion(request, scenarioId, false);
+      void runVersion(request, false);
     },
     [running, project, runVersion],
   );
 
-  /** 从 Sidebar 最近项目打开：直接加载已完成版本（TODO: 接入 Supabase 后读真实版本） */
+  /** 从 Sidebar 最近项目打开：加载本地罐头演示（零成本，免费账号可用） */
   const openScenario = useCallback(
     (scenarioId: string) => {
       if (running) return;
       const scenario = getCannedScenario(scenarioId);
       if (!scenario) return;
-      lastScenarioId.current = scenarioId;
       const id = ++versionId.current;
       const version: Version = {
         id,
@@ -296,6 +322,21 @@ export function useWorkspace() {
     [running],
   );
 
+  /** 用户决策 → 服务端确认门 */
+  const submitApproval = useCallback(
+    (approved: boolean) => {
+      const sessionId = approvalSessionId.current;
+      setAwaitingApproval(false);
+      if (!sessionId) return;
+      void fetch("/api/pipeline/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, approved }),
+      });
+    },
+    [],
+  );
+
   const approve = useCallback(() => {
     const id = activeVersionId.current;
     if (id !== null) {
@@ -309,16 +350,24 @@ export function useWorkspace() {
         ),
       }));
     }
-    setAwaitingApproval(false);
-    approveResolver.current?.(true);
-    approveResolver.current = null;
-  }, [updateVersion]);
+    submitApproval(true);
+  }, [updateVersion, submitApproval]);
 
   const reject = useCallback(() => {
-    setAwaitingApproval(false);
-    approveResolver.current?.(false);
-    approveResolver.current = null;
-  }, []);
+    const id = activeVersionId.current;
+    if (id !== null) {
+      updateVersion(id, (v) => ({
+        ...v,
+        status: "running",
+        stages: v.stages.map((s) =>
+          s.stage === "approve"
+            ? { ...s, status: "failed", detail: "用户拒绝规格" }
+            : s,
+        ),
+      }));
+    }
+    submitApproval(false);
+  }, [updateVersion, submitApproval]);
 
   return {
     project,

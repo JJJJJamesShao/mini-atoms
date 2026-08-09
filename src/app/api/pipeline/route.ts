@@ -1,7 +1,9 @@
 import { NextRequest } from "next/server";
 import { runPipeline } from "@/lib/agent";
 import { createLLMExecutors } from "@/lib/agent/llm-executors";
-import { createClient } from "@supabase/supabase-js";
+import { createProject } from "@/lib/db/projects";
+import { createVersion } from "@/lib/db/versions";
+import { createMessage } from "@/lib/db/messages";
 
 /**
  * POST /api/pipeline
@@ -63,9 +65,34 @@ export async function POST(req: NextRequest) {
           send({ type: "stage", ...event });
         }
 
+        // 流水线成功后持久化：项目 + 版本 + 消息（任务 3）
+        // TODO: 接入 Auth 后关联 user_id；持久化失败不阻断生成结果返回
+        let projectId: string | null = null;
+        if (finalState === "done" && result) {
+          try {
+            const project = await createProject(input);
+            await createVersion(project.id, result.files, 1);
+            await createMessage(project.id, "user", input);
+            await createMessage(
+              project.id,
+              "assistant",
+              result.notes || "生成完成",
+            );
+            projectId = project.id;
+            send({ type: "project_created", projectId });
+          } catch (dbErr) {
+            send({
+              type: "persist_error",
+              message:
+                dbErr instanceof Error ? dbErr.message : JSON.stringify(dbErr),
+            });
+          }
+        }
+
         send({
           type: "done",
           finalState,
+          projectId,
           result: result
             ? {
                 files: result.files,

@@ -1,7 +1,7 @@
 import type { Executors } from "../agent";
 import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
 import type OpenAI from "openai";
-import { chat, streamChat } from "@/lib/llm/client";
+import { chat, streamGLM } from "@/lib/llm/client";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -172,46 +172,18 @@ export function createLLMExecutors(
         const messages = options?.structured
           ? buildGameGeneratePrompt(spec, errors)
           : buildGeneratePrompt(spec, errors);
-        const config = MODEL_ROUTING.generate;
-        console.log("[DEBUG] Generate 使用模型:", config.model);
 
-        // GLM 5.2 流式 API 偶发返回空内容，降级为非流式 + 模拟进度
+        // 使用 GLM-5.2 流式生成代码（提供更好的实时体验）
         bus?.emit({
           type: "agent:progress",
           agent: "generate",
           role: "前端工程师",
           percent: 10,
-          message: "正在调用 LLM 生成代码，预计 15-30 秒...",
+          message: "正在调用 GLM-5.2 生成代码...",
         });
 
-        console.log("[DEBUG] Generate 请求:", {
-          model: config.model,
-          maxTokens: config.maxTokens,
-          temperature: config.temperature,
-          promptLength: messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0),
-          isStructured: options?.structured,
-          messageCount: messages.length,
-        });
-
-        const response = await chat(config, messages);
-        
-        console.log("[DEBUG] Generate 响应:", {
-          status: response.choices?.[0]?.finish_reason,
-          contentLength: response.choices?.[0]?.message?.content?.length ?? 0,
-          contentPrefix: response.choices?.[0]?.message?.content?.slice(0, 200) ?? "EMPTY",
-        });
-
-        const content = response.choices[0]?.message?.content ?? "";
-        const charCount = content.length;
-        const estimatedTokens = Math.round(charCount * 0.75);
-
-        bus?.emit({
-          type: "agent:progress",
-          agent: "generate",
-          role: "前端工程师",
-          percent: 90,
-          message: `代码生成完成，共 ${charCount} 字符，正在解析...`,
-        });
+        const stream = await streamGLM(messages, { maxTokens: 4096, temperature: 0.2 });
+        const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);
 
         let result: GenerateOutput;
         if (options?.structured) {

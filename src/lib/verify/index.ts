@@ -1,6 +1,6 @@
 import * as acorn from "acorn";
 import { parse } from "node-html-parser";
-import type { VerifyResult } from "../schemas";
+import type { File, VerifyResult } from "../schemas";
 
 interface VerifyError {
   rule: string;
@@ -83,4 +83,17 @@ export function verifyHtml(code: string): VerifyResult {
     return { pass: false, stage: "structure", errors: structureErrors };
   }
   return { pass: true, stage: "structure", errors: [] };
+}
+
+/** 项目级校验：从文件列表中提取 index.html 进行校验（当前阶段只校验主入口） */
+export function verifyProject(files: File[]): VerifyResult {
+  const entry = files.find((f) => f.path === "index.html");
+  if (!entry) {
+    return {
+      pass: false,
+      stage: "structure",
+      errors: [{ rule: "missing-entry", message: "缺少 index.html 入口文件" }],
+    };
+  }
+  return verifyHtml(entry.content);
 }

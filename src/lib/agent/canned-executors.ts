@@ -1,6 +1,6 @@
 import { cannedScenarios } from "../mock/canned";
 import type { Executors } from "./index";
-import { verifyHtml } from "../verify";
+import { verifyProject } from "../verify";
 
 /**
  * 罐头执行器：默认实现，使用 T1 罐头数据。
@@ -15,6 +15,6 @@ export function createCannedExecutors(scenarioId = "todo"): Executors {
     clarify: async () => scenario.clarify,
     spec: async () => scenario.spec,
     generate: async () => scenario.generate,
-    verify: async (code) => verifyHtml(code),
+    verify: async (files) => verifyProject(files),
   };
 }

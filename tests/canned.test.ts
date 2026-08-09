@@ -21,9 +21,12 @@ describe("罐头数据契约校验", () => {
   );
 
   it.each(cannedScenarios.map((s) => [s.title, s] as const))(
-    "%s：generate.code 是完整单文件 HTML 且 <8KB",
+    "%s：generate.files 包含完整单文件 HTML 且 <8KB",
     (_title, scenario) => {
-      const code = scenario.generate.code;
+      const files = scenario.generate.files;
+      expect(files).toHaveLength(1);
+      const code = files[0].content;
+      expect(files[0].path).toBe("index.html");
       expect(code).toMatch(/^<!DOCTYPE html>/i);
       expect(code).toContain("<style>");
       expect(code).toContain("<script>");

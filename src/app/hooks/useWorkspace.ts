@@ -39,6 +39,15 @@ export interface Version {
   html: string | null;
 }
 
+export interface ExecutionLog {
+  id: number;
+  versionId: number;
+  stage: StageName;
+  phase: "start" | "end";
+  detail?: string;
+  timestamp: number;
+}
+
 export interface Project {
   title: string;
   versions: Version[];
@@ -71,8 +80,11 @@ export function useWorkspace() {
   );
   const [awaitingApproval, setAwaitingApproval] = useState(false);
   const [running, setRunning] = useState(false);
+  /** 全局执行日志：所有版本的阶段事件统一队列 */
+  const [executionLogs, setExecutionLogs] = useState<ExecutionLog[]>([]);
 
   const versionId = useRef(0);
+  const logId = useRef(0);
   const activeVersionId = useRef<number | null>(null);
   /** 当前挂起审批的会话 id（服务端确认门凭证） */
   const approvalSessionId = useRef<string | null>(null);
@@ -142,6 +154,19 @@ export function useWorkspace() {
           note,
         }));
 
+      /** 推送全局执行日志 */
+      const pushLog = (stage: StageName, phase: "start" | "end", detail?: string) => {
+        const entry: ExecutionLog = {
+          id: ++logId.current,
+          versionId: id,
+          stage,
+          phase,
+          detail,
+          timestamp: Date.now(),
+        };
+        setExecutionLogs((prev) => [...prev, entry]);
+      };
+
       const handleEvent = (event: Record<string, unknown>) => {
         const type = event.type as string;
 
@@ -155,10 +180,12 @@ export function useWorkspace() {
               "active",
               event.isRetry ? "校验未通过，自动修复重试" : undefined,
             );
+            pushLog(state, "start", event.isRetry ? "修复重试" : undefined);
             return;
           }
 
           // phase === "end"
+          pushLog(state, "end");
           if (state === "clarify") {
             setStage("clarify", "done", event.summary as string);
           } else if (state === "spec") {
@@ -171,7 +198,17 @@ export function useWorkspace() {
                 : undefined,
             );
           } else if (state === "generate") {
-            setStage("generate", "done", event.notes as string);
+            if (event.phase === "start") {
+              setStage(
+                "generate",
+                "active",
+                event.isRetry
+                  ? "校验未通过，自动修复重试中..."
+                  : "正在调用 LLM 生成代码，预计 15-30 秒...",
+              );
+            } else {
+              setStage("generate", "done", event.notes as string);
+            }
           } else if (state === "verify") {
             const pass = event.pass as boolean;
             const errors = event.errors as
@@ -374,6 +411,7 @@ export function useWorkspace() {
     selectedVersionId,
     awaitingApproval,
     running,
+    executionLogs,
     startProject,
     sendFollowUp,
     openScenario,

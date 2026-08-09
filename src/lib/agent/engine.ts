@@ -20,8 +20,8 @@ import type {
   VerifyResult,
 } from "../schemas";
 
-/** verify 失败后允许的最大修复次数，用尽则 fail */
-const MAX_FIX_ATTEMPTS = 2;
+/** verify 失败后允许的最大修复次数（含多轮 Patch），用尽则 fail */
+const MAX_FIX_ATTEMPTS = 5;
 /** 步数上限，防止 SOP 配置错误导致死循环 */
 const MAX_STEPS = 50;
 
@@ -179,7 +179,8 @@ async function executeStep(
   approver: Approver | undefined,
   bus: AgentEventBus | undefined,
 ): Promise<unknown> {
-  const roleName = step.role === "system" ? "系统" : ROLES[step.role].config.name;
+  const roleName =
+    step.role === "system" ? "系统" : ROLES[step.role].config.name;
 
   switch (step.action) {
     case "clarify": {
@@ -213,7 +214,13 @@ async function executeStep(
     }
     case "generate": {
       if (!ctx.spec) throw new Error("generate 步骤缺少 spec 产物");
-      const out = await executors.generate(ctx.spec, ctx.lastErrors);
+      // fix 模式：传入当前代码和 fix 轮次，让 generate 走 patch 编辑而非完整重写
+      const out = await executors.generate(
+        ctx.spec,
+        ctx.lastErrors,
+        ctx.generated?.files,
+        ctx.fixAttempts,
+      );
       ctx.generated = out;
       return out;
     }

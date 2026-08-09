@@ -81,15 +81,15 @@ export const ROLES = {
     goal: "理解用户需求，判断是否需要澄清",
     constraints: ["简单需求直接通过", "最多提3个问题"],
     model: "qwen3.6-flash",
-    maxTokens: 2048,
+    maxTokens: 65536,
   }),
   /** 架构师：规格生成（spec 节点，快模型结构化输出） */
   architect: new Role({
     name: "架构师",
     goal: "将需求拆解为技术规格",
     constraints: ["严格JSON输出", "包含约束条件"],
-    model: "qwen3.6-flash",
-    maxTokens: 4096,
+    model: "qwen3.8-max",
+    maxTokens: 131072,
   }),
   /** 前端工程师：代码生成（generate 节点，强代码模型） */
   engineer: new Role({
@@ -97,7 +97,7 @@ export const ROLES = {
     goal: "生成完整可运行的单文件HTML",
     constraints: ["无外部依赖", "原生JS", "内联样式"],
     model: "glm-5.2",
-    maxTokens: 4096,
+    maxTokens: 131072,
   }),
   /** 代码审查员：产物校验（verify 节点，零模型确定性检查） */
   reviewer: new Role({

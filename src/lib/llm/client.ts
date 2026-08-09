@@ -72,7 +72,7 @@ export async function streamGLM(
   return client.chat.completions.create({
     model: "glm-5.2",
     messages,
-    max_tokens: options?.maxTokens ?? 4096,
+    max_tokens: options?.maxTokens ?? 131072,
     temperature: options?.temperature ?? 0.2,
     stream: true,
   });
@@ -87,7 +87,7 @@ export async function chatGLM(
   return client.chat.completions.create({
     model: "glm-5.2",
     messages,
-    max_tokens: options?.maxTokens ?? 4096,
+    max_tokens: options?.maxTokens ?? 131072,
     temperature: options?.temperature ?? 0.2,
     stream: false,
   });

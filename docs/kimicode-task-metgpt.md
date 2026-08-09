@@ -25,16 +25,16 @@
 
 ```typescript
 export interface RoleConfig {
-  name: string;           // "产品经理"
-  goal: string;           // "理解用户需求，产出清晰的产品规格"
-  constraints: string[];  // ["不超过3个澄清问题", "简单需求直接通过"]
-  model: string;          // "qwen3.6-flash"
+  name: string; // "产品经理"
+  goal: string; // "理解用户需求，产出清晰的产品规格"
+  constraints: string[]; // ["不超过3个澄清问题", "简单需求直接通过"]
+  model: string; // "qwen3.6-flash"
   maxTokens?: number;
 }
 
 export class Role {
   constructor(public config: RoleConfig) {}
-  
+
   systemPrompt(): string {
     return `你是${this.config.name}。${this.config.goal}
 约束：${this.config.constraints.join("\n")}`;
@@ -48,21 +48,21 @@ export const ROLES = {
     goal: "理解用户需求，判断是否需要澄清",
     constraints: ["简单需求直接通过", "最多提3个问题"],
     model: "qwen3.6-flash",
-    maxTokens: 2048,
+    maxTokens: 65536,
   }),
   architect: new Role({
     name: "架构师",
     goal: "将需求拆解为技术规格",
     constraints: ["严格JSON输出", "包含约束条件"],
-    model: "qwen3.6-flash",
-    maxTokens: 4096,
+    model: "qwen3.8-max",
+    maxTokens: 131072,
   }),
   engineer: new Role({
     name: "前端工程师",
     goal: "生成完整可运行的单文件HTML",
     constraints: ["无外部依赖", "原生JS", "内联样式"],
     model: "glm-5.2",
-    maxTokens: 4096,
+    maxTokens: 131072,
   }),
   reviewer: new Role({
     name: "代码审查员",
@@ -83,24 +83,27 @@ export const ROLES = {
 
 ```typescript
 export interface SOPStep {
-  name: string;           // "clarify"
-  role: string;           // "pm"
-  action: string;         // "clarify"
-  next: string | {        // 简单分支
-    default: string;
-    conditions?: Array<{
-      field: string;       // "status"
-      operator: "eq" | "ne";
-      value: string;
-      then: string;
-    }>;
-  };
-  timeout?: number;       // 秒，默认 60
+  name: string; // "clarify"
+  role: string; // "pm"
+  action: string; // "clarify"
+  next:
+    | string
+    | {
+        // 简单分支
+        default: string;
+        conditions?: Array<{
+          field: string; // "status"
+          operator: "eq" | "ne";
+          value: string;
+          then: string;
+        }>;
+      };
+  timeout?: number; // 秒，默认 60
 }
 
 export interface SOPConfig {
-  id: string;             // "web-app"
-  name: string;           // "网页应用生成"
+  id: string; // "web-app"
+  name: string; // "网页应用生成"
   description: string;
   steps: SOPStep[];
 }
@@ -111,11 +114,46 @@ export const DEFAULT_SOP: SOPConfig = {
   name: "网页应用",
   description: "通用单文件 HTML 应用生成",
   steps: [
-    { name: "clarify", role: "pm", action: "clarify", next: { default: "spec", conditions: [{ field: "status", operator: "eq", value: "need_clarification", then: "fail" }] } },
+    {
+      name: "clarify",
+      role: "pm",
+      action: "clarify",
+      next: {
+        default: "spec",
+        conditions: [
+          {
+            field: "status",
+            operator: "eq",
+            value: "need_clarification",
+            then: "fail",
+          },
+        ],
+      },
+    },
     { name: "spec", role: "architect", action: "spec", next: "approve" },
-    { name: "approve", role: "pm", action: "approve", next: { default: "generate", conditions: [{ field: "approved", operator: "eq", value: "false", then: "fail" }] } },
+    {
+      name: "approve",
+      role: "pm",
+      action: "approve",
+      next: {
+        default: "generate",
+        conditions: [
+          { field: "approved", operator: "eq", value: "false", then: "fail" },
+        ],
+      },
+    },
     { name: "generate", role: "engineer", action: "generate", next: "verify" },
-    { name: "verify", role: "reviewer", action: "verify", next: { default: "done", conditions: [{ field: "pass", operator: "eq", value: "false", then: "fix" }] } },
+    {
+      name: "verify",
+      role: "reviewer",
+      action: "verify",
+      next: {
+        default: "done",
+        conditions: [
+          { field: "pass", operator: "eq", value: "false", then: "fix" },
+        ],
+      },
+    },
     { name: "fix", role: "engineer", action: "fix", next: "generate" },
     { name: "done", role: "system", action: "done", next: "" },
     { name: "fail", role: "system", action: "fail", next: "" },
@@ -131,7 +169,17 @@ export const GAME_SOP: SOPConfig = {
     { name: "clarify", role: "pm", action: "clarify", next: "spec" },
     { name: "spec", role: "architect", action: "spec", next: "generate" },
     { name: "generate", role: "engineer", action: "generate", next: "verify" },
-    { name: "verify", role: "reviewer", action: "verify", next: { default: "done", conditions: [{ field: "pass", operator: "eq", value: "false", then: "fix" }] } },
+    {
+      name: "verify",
+      role: "reviewer",
+      action: "verify",
+      next: {
+        default: "done",
+        conditions: [
+          { field: "pass", operator: "eq", value: "false", then: "fix" },
+        ],
+      },
+    },
     { name: "fix", role: "engineer", action: "fix", next: "generate" },
     { name: "done", role: "system", action: "done", next: "" },
   ],
@@ -231,14 +279,15 @@ export async function runSOP(
 
 function resolveNext(step: SOPStep, result: unknown): string {
   if (typeof step.next === "string") return step.next;
-  
+
   // 条件分支
   const resultObj = result as Record<string, unknown>;
   for (const condition of step.next.conditions ?? []) {
     const field = resultObj?.[condition.field];
-    const match = condition.operator === "eq" 
-      ? String(field) === condition.value
-      : String(field) !== condition.value;
+    const match =
+      condition.operator === "eq"
+        ? String(field) === condition.value
+        : String(field) !== condition.value;
     if (match) return condition.then;
   }
   return step.next.default;
@@ -268,11 +317,11 @@ import { SOP_REGISTRY } from "./sop";
 
 export function selectSOP(input: string): string {
   const lower = input.toLowerCase();
-  
+
   // 关键词匹配
   if (/游戏|game|贪吃蛇|数独|坦克/.test(lower)) return "game";
   if (/工具|计算器|计时器|todo|待办/.test(lower)) return "tool";
-  
+
   // 默认网页应用
   return "web-app";
 }
@@ -283,6 +332,7 @@ export function selectSOP(input: string): string {
 ### 任务 5：API Route 接入新引擎（30min）
 
 **修改**：`src/app/api/pipeline/route.ts`
+
 - 用 `selectSOP(input)` 选流程
 - 用 `runSOP()` 替换 `runPipeline()`
 - 保持 SSE 输出格式不变（前端兼容）
@@ -292,6 +342,7 @@ export function selectSOP(input: string): string {
 ### 任务 6：前端适配（30min）
 
 **修改**：`src/app/hooks/useWorkspace.ts`
+
 - `STAGE_ORDER` 不再硬编码，从 SOP 配置读取
 - VersionCard 显示当前使用的 SOP 名称
 
@@ -299,14 +350,14 @@ export function selectSOP(input: string): string {
 
 ## 时间账
 
-| 任务 | 时间 | 累计 |
-|------|------|------|
-| Role 基类 | 30min | 30min |
-| SOP DSL + 预设 | 1h | 1.5h |
-| 执行引擎 | 1h | 2.5h |
-| SOP 路由 | 30min | 3h |
-| API 接入 | 30min | 3.5h |
-| 前端适配 + 测试 | 30min | 4h |
+| 任务            | 时间  | 累计  |
+| --------------- | ----- | ----- |
+| Role 基类       | 30min | 30min |
+| SOP DSL + 预设  | 1h    | 1.5h  |
+| 执行引擎        | 1h    | 2.5h  |
+| SOP 路由        | 30min | 3h    |
+| API 接入        | 30min | 3.5h  |
+| 前端适配 + 测试 | 30min | 4h    |
 
 ---
 
@@ -332,10 +383,11 @@ export function selectSOP(input: string): string {
 ## 降级预案
 
 如果时间不够：
+
 1. 只做任务 1+2（Role + SOP 配置），不接入执行引擎
 2. 执行引擎复用现有 `runPipeline`，只加 SOP 选择逻辑
 3. 前端只做 SOP 名称显示
 
 ---
 
-*任务包版本：v1.0 — 2026-08-10 01:05*
+_任务包版本：v1.0 — 2026-08-10 01:05_

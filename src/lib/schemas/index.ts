@@ -36,15 +36,25 @@ export const GenerateOutputSchema = z.object({
 });
 export type GenerateOutput = z.infer<typeof GenerateOutputSchema>;
 
+/** 校验错误（精确定位） */
+export const VerifyErrorSchema = z.object({
+  rule: z.string(),
+  message: z.string(),
+  /** 错误所在行号（1-based） */
+  line: z.number().optional(),
+  /** 错误所在列号（1-based） */
+  column: z.number().optional(),
+  /** 出错代码片段（含上下文） */
+  snippet: z.string().optional(),
+  /** 修复建议 */
+  suggestion: z.string().optional(),
+});
+export type VerifyError = z.infer<typeof VerifyErrorSchema>;
+
 /** 校验节点输出 */
 export const VerifyResultSchema = z.object({
   pass: z.boolean(),
-  stage: z.enum(["syntax", "structure"]),
-  errors: z.array(
-    z.object({
-      rule: z.string(),
-      message: z.string(),
-    }),
-  ),
+  stage: z.enum(["syntax", "security", "structure"]),
+  errors: z.array(VerifyErrorSchema),
 });
 export type VerifyResult = z.infer<typeof VerifyResultSchema>;

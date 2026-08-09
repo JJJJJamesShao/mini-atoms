@@ -7,7 +7,7 @@ export interface ModelConfig {
   temperature?: number;
 }
 
-/** 节点级模型路由：不同节点用不同模型平衡成本与质量 */
+/** 节点级模型路由：不同节点分配不同模型平衡成本与质量 */
 export const MODEL_ROUTING = {
   /** 需求澄清：快模型，成本低，只需理解意图 */
   clarify: {
@@ -51,7 +51,7 @@ export const MODEL_ROUTING = {
 
   /** 备选强模型 */
   deepseek: {
-    model: "deepseek-v4-pro",
+    model: "deepseek-v4-flash-0731",
     desc: "备选强模型",
     maxTokens: 8192,
     temperature: 0.2,

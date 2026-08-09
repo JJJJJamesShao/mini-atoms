@@ -105,10 +105,15 @@ describe("SOP 配置完整性", () => {
         const targets =
           typeof step.next === "string"
             ? [step.next]
-            : [step.next.default, ...(step.next.conditions ?? []).map((c) => c.then)];
+            : [
+                step.next.default,
+                ...(step.next.conditions ?? []).map((c) => c.then),
+              ];
         for (const target of targets) {
           if (target === "") continue;
-          expect(names.has(target), `${sop.id}.${step.name} → ${target}`).toBe(true);
+          expect(names.has(target), `${sop.id}.${step.name} → ${target}`).toBe(
+            true,
+          );
         }
         if (step.role !== "system") {
           expect(ROLES[step.role], `${sop.id}.${step.name} role`).toBeDefined();
@@ -122,7 +127,12 @@ describe("runSOP 执行引擎", () => {
   it("web-app happy path：approve 通过 → done，顺序执行", async () => {
     const { executors, calls } = makeExecutors();
     const approver = vi.fn(async () => true);
-    const out = await runSOP("做一个电商网站", DEFAULT_SOP, executors, approver);
+    const out = await runSOP(
+      "做一个电商网站",
+      DEFAULT_SOP,
+      executors,
+      approver,
+    );
 
     expect(out.finalState).toBe("done");
     expect(out.result?.files).toEqual(GENERATED.files);
@@ -132,7 +142,12 @@ describe("runSOP 执行引擎", () => {
 
   it("web-app approve 拒绝 → fail(spec_rejected)，不进入 generate", async () => {
     const { executors, calls } = makeExecutors();
-    const out = await runSOP("做一个电商网站", DEFAULT_SOP, executors, async () => false);
+    const out = await runSOP(
+      "做一个电商网站",
+      DEFAULT_SOP,
+      executors,
+      async () => false,
+    );
 
     expect(out.finalState).toBe("fail");
     expect(out.reason).toBe("spec_rejected");
@@ -153,7 +168,12 @@ describe("runSOP 执行引擎", () => {
 
   it("clarify 需要澄清 → fail(need_clarification)", async () => {
     const { executors } = makeExecutors({ clarify: async () => NEED_CLARIFY });
-    const out = await runSOP("随便做点什么", DEFAULT_SOP, executors, async () => true);
+    const out = await runSOP(
+      "随便做点什么",
+      DEFAULT_SOP,
+      executors,
+      async () => true,
+    );
 
     expect(out.finalState).toBe("fail");
     expect(out.reason).toBe("need_clarification");
@@ -166,7 +186,14 @@ describe("runSOP 执行引擎", () => {
     const out = await runSOP("做一个数独游戏", GAME_SOP, executors);
 
     expect(out.finalState).toBe("done");
-    expect(calls).toEqual(["clarify", "spec", "generate", "verify", "generate", "verify"]);
+    expect(calls).toEqual([
+      "clarify",
+      "spec",
+      "generate",
+      "verify",
+      "generate",
+      "verify",
+    ]);
   });
 
   it("verify 连续失败 → 修复次数用尽 → fail(verify_failed)", async () => {
@@ -177,7 +204,7 @@ describe("runSOP 执行引擎", () => {
 
     expect(out.finalState).toBe("fail");
     expect(out.reason).toBe("verify_failed");
-    // 1 次首生 + 1 次修复重生；第 2 次 fix 判定次数用尽 → fail
-    expect(calls.filter((c) => c === "generate")).toHaveLength(2);
+    // 1 次首次生成 + 4 次修复重试（MAX_FIX_ATTEMPTS=5，第 5 次 fix 判定用尽）
+    expect(calls.filter((c) => c === "generate")).toHaveLength(5);
   });
 });

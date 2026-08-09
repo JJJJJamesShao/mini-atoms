@@ -112,8 +112,7 @@ export function useWorkspace() {
       approvalSessionId.current = null;
       activeStages.current = STAGE_ORDER;
 
-      const title =
-        request.length > 30 ? `${request.slice(0, 30)}…` : request;
+      const title = request.length > 30 ? `${request.slice(0, 30)}…` : request;
       const version: Version = {
         id,
         request,
@@ -158,7 +157,11 @@ export function useWorkspace() {
         }));
 
       /** 推送全局执行日志 */
-      const pushLog = (stage: StageName, phase: "start" | "end" | "progress", detail?: string) => {
+      const pushLog = (
+        stage: StageName,
+        phase: "start" | "end" | "progress",
+        detail?: string,
+      ) => {
         const entry: ExecutionLog = {
           id: ++logId.current,
           versionId: id,
@@ -189,8 +192,7 @@ export function useWorkspace() {
         if (type === "start") {
           // 服务端 SOP 路由结果：动态生成阶段卡片，版本标题标注 SOP 名称
           const sop = event.sop as
-            | { id: string; name: string; steps: string[] }
-            | undefined;
+            { id: string; name: string; steps: string[] } | undefined;
           if (sop) {
             const steps = sop.steps.filter((s): s is StageName =>
               (STAGE_ORDER as readonly string[]).includes(s),
@@ -220,66 +222,113 @@ export function useWorkspace() {
           };
           const agentStage = ae.agent as StageName;
 
-          if (ae.type === "agent:start" && activeStages.current.includes(agentStage)) {
+          if (
+            ae.type === "agent:start" &&
+            activeStages.current.includes(agentStage)
+          ) {
             setStage(agentStage, "active", ae.role);
             pushLog(agentStage, "start", ae.role);
             return;
           }
 
-          if (ae.type === "agent:complete" && activeStages.current.includes(agentStage)) {
+          if (
+            ae.type === "agent:complete" &&
+            activeStages.current.includes(agentStage)
+          ) {
             pushLog(agentStage, "end", ae.message);
             if (agentStage === "clarify") {
               const out = ae.output as { summary?: string } | undefined;
               setStage("clarify", "done", out?.summary ?? "需求已澄清");
             } else if (agentStage === "spec") {
               const out = ae.output as SpecOutput | undefined;
-              setStage("spec", "done", out ? `${out.requirements.length} 条需求 / ${out.constraints.length} 条约束` : "规格已生成");
+              setStage(
+                "spec",
+                "done",
+                out
+                  ? `${out.requirements.length} 条需求 / ${out.constraints.length} 条约束`
+                  : "规格已生成",
+              );
             } else if (agentStage === "generate") {
               setStage("generate", "done", ae.message ?? "代码已生成");
             } else if (agentStage === "verify") {
               const out = ae.output as { pass?: boolean } | undefined;
-              setStage("verify", out?.pass !== false ? "done" : "failed", ae.message ?? "校验完成");
+              setStage(
+                "verify",
+                out?.pass !== false ? "done" : "failed",
+                ae.message ?? "校验完成",
+              );
             }
             return;
           }
 
-          if ((ae.type === "agent:thinking" || ae.type === "agent:progress") && ae.agent === "generate") {
-            const msg = ae.message || (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
+          if (
+            (ae.type === "agent:thinking" || ae.type === "agent:progress") &&
+            ae.agent === "generate"
+          ) {
+            const msg =
+              ae.message ||
+              (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
             setStage("generate", "active", msg);
             pushLog("generate", "progress", msg);
             return;
           }
 
           if (ae.type === "agent:error") {
-            setStage(agentStage, "failed", ae.error ?? ae.message ?? "执行出错");
+            setStage(
+              agentStage,
+              "failed",
+              ae.error ?? ae.message ?? "执行出错",
+            );
             return;
           }
 
           if (ae.type === "file:generated") {
-            const file = ae.output as { path: string; size: number } | undefined;
-            pushLog(agentStage, "progress", `📄 ${file?.path ?? "文件"}（${file?.size ?? 0} 字符）`);
+            const file = ae.output as
+              { path: string; size: number } | undefined;
+            pushLog(
+              agentStage,
+              "progress",
+              `📄 ${file?.path ?? "文件"}（${file?.size ?? 0} 字符）`,
+            );
             return;
           }
         } else if (type === "approve_needed") {
           approvalSessionId.current = event.sessionId as string;
-          updateVersion(id, (v) => ({ ...v, spec: event.spec as SpecOutput, status: "awaiting" }));
+          updateVersion(id, (v) => ({
+            ...v,
+            spec: event.spec as SpecOutput,
+            status: "awaiting",
+          }));
           setStage("approve", "active");
           setAwaitingApproval(true);
         } else if (type === "done") {
-          const result = event.result as { files: { path: string; content: string }[]; notes: string } | null;
+          const result = event.result as {
+            files: { path: string; content: string }[];
+            notes: string;
+          } | null;
           if (event.finalState === "done" && result) {
             // 强制同步所有未完成的 stages，防止状态不一致
             finalizeStages("done", result.notes);
             setStage("done", "done", result.notes);
-            const html = result.files.find((f) => f.path === "index.html") ?? result.files[0];
-            updateVersion(id, (v) => ({ ...v, status: "done", html: html.content, note: result.notes }));
+            const html =
+              result.files.find((f) => f.path === "index.html") ??
+              result.files[0];
+            updateVersion(id, (v) => ({
+              ...v,
+              status: "done",
+              html: html.content,
+              note: result.notes,
+            }));
           } else {
             const reason = failReasonText(event.reason as string | null);
             finalizeStages("failed", reason);
             failVersion(reason);
           }
         } else if (type === "persist_error") {
-          updateVersion(id, (v) => ({ ...v, note: `${v.note ?? ""}（保存到云端失败：${event.message}）` }));
+          updateVersion(id, (v) => ({
+            ...v,
+            note: `${v.note ?? ""}（保存到云端失败：${event.message}）`,
+          }));
         } else if (type === "error") {
           const msg = `服务端错误：${event.message}`;
           finalizeStages("failed", msg);
@@ -359,7 +408,39 @@ export function useWorkspace() {
     [running, project, runVersion],
   );
 
-  /** 从 Sidebar 最近项目打开：加载本地罐头演示（零成本，免费账号可用） */
+  /** 从 Sidebar 打开真实项目：调 API 获取项目详情 */
+  const openProject = useCallback(
+    async (projectId: string) => {
+      if (running) return;
+      try {
+        const res = await fetch(`/api/projects/${projectId}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        const id = ++versionId.current;
+        const version: Version = {
+          id,
+          request: data.project.title,
+          scenarioTitle: data.project.title,
+          status: "done",
+          stages: STAGE_ORDER.map((stage) => ({
+            stage,
+            status: "done" as const,
+          })),
+          spec: null,
+          note: `创建于 ${new Date(data.project.created_at).toLocaleDateString()}`,
+          html: data.latestHtml,
+        };
+        setProject({ title: data.project.title, versions: [version] });
+        setSelectedVersionId(id);
+      } catch (err) {
+        console.error("[openProject]", err);
+      }
+    },
+    [running],
+  );
+
+  /** 从 Sidebar 打开示例项目（罐头演示） */
   const openScenario = useCallback(
     (scenarioId: string) => {
       if (running) return;
@@ -386,19 +467,16 @@ export function useWorkspace() {
   );
 
   /** 用户决策 → 服务端确认门 */
-  const submitApproval = useCallback(
-    (approved: boolean) => {
-      const sessionId = approvalSessionId.current;
-      setAwaitingApproval(false);
-      if (!sessionId) return;
-      void fetch("/api/pipeline/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, approved }),
-      });
-    },
-    [],
-  );
+  const submitApproval = useCallback((approved: boolean) => {
+    const sessionId = approvalSessionId.current;
+    setAwaitingApproval(false);
+    if (!sessionId) return;
+    void fetch("/api/pipeline/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, approved }),
+    });
+  }, []);
 
   const approve = useCallback(() => {
     const id = activeVersionId.current;
@@ -440,6 +518,7 @@ export function useWorkspace() {
     executionLogs,
     startProject,
     sendFollowUp,
+    openProject,
     openScenario,
     selectVersion: setSelectedVersionId,
     approve,

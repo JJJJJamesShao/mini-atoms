@@ -3,10 +3,14 @@
 -- 注意：现有库的三表为手动创建，本文件用于 fresh 环境复现；幂等可重复执行
 
 -- 1. 项目
+-- 加 pinned 字段（2025-08-10）：支持用户置顶常用项目
+alter table if exists public.projects add column if not exists pinned boolean not null default false;
+
 create table if not exists public.projects (
   id uuid primary key default gen_random_uuid(),
   user_id uuid references auth.users(id),
   title text not null,
+  pinned boolean not null default false,
   created_at timestamptz not null default now()
 );
 

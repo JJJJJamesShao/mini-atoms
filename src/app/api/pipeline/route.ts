@@ -8,16 +8,12 @@ import type { SpecOutput } from "@/lib/schemas";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
-import { getUserRole, type UserRole } from "@/lib/db/profiles";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { createAuthClient } from "@/lib/supabase/auth-server";
 import { waitForApproval } from "./gate";
 
-/** 各角色每日 LLM 生成额度：free=0（仅罐头演示），paid 暂不限量 */
-const DAILY_QUOTA: Record<UserRole, number> = {
-  free: 0,
-  paid: Number.POSITIVE_INFINITY,
-};
+/** 每日生成额度上限（所有用户统一） */
+const DAILY_QUOTA = 10;
 
 const jsonError = (status: number, payload: Record<string, unknown>) =>
   new Response(JSON.stringify(payload), {
@@ -27,14 +23,7 @@ const jsonError = (status: number, payload: Record<string, unknown>) =>
 
 /**
  * POST /api/pipeline
- * 服务端 Agent 流水线入口（LLM 生成，强制登录 + 角色额度检查）
- *
- * 流程：
- * 1. 鉴权：未登录 401
- * 2. RBAC：角色从 profiles 表读取，免费账号额度 0 → 403；超限 → 429
- * 3. SOP 路由（selectSOP）+ runSOP 引擎执行，SSE 实时推送 Agent 事件
- * 4. approve 阶段挂起（仅含确认门的 SOP），等待 /api/pipeline/confirm 注入决策
- * 5. 成功后持久化项目/版本/消息并关联 user_id
+ * 服务端 Agent 流水线入口（强制登录 + 每日额度限制）
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
@@ -52,24 +41,18 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return jsonError(401, {
       error: "unauthorized",
-      message: "请先登录后再使用 LLM 生成",
+      message: "请先登录后再使用生成",
     });
   }
 
-  // 2. 角色与额度
-  const role = await getUserRole(user.id);
+  // 2. 每日额度检查
   const used = await countUsageToday(user.id, "generate");
-  const quota = DAILY_QUOTA[role];
-  if (used >= quota) {
-    return jsonError(role === "free" ? 403 : 429, {
+  if (used >= DAILY_QUOTA) {
+    return jsonError(429, {
       error: "quota_exceeded",
-      role,
       used,
-      quota: quota === Number.POSITIVE_INFINITY ? null : quota,
-      message:
-        role === "free"
-          ? "免费账号仅支持罐头演示（零成本），LLM 生成需付费账号"
-          : "今日生成额度已用完",
+      quota: DAILY_QUOTA,
+      message: `今日生成额度已用完（${used}/${DAILY_QUOTA}），请明日再试`,
     });
   }
 
@@ -121,7 +104,14 @@ export async function POST(req: NextRequest) {
         const displaySteps = sop.steps
           .map((s) => s.name)
           .filter((n) =>
-            ["clarify", "spec", "approve", "generate", "verify", "done"].includes(n),
+            [
+              "clarify",
+              "spec",
+              "approve",
+              "generate",
+              "verify",
+              "done",
+            ].includes(n),
           );
         send({
           type: "start",

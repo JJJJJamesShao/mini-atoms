@@ -170,15 +170,33 @@ export function createLLMExecutors(
           : buildGeneratePrompt(spec, errors);
         // 使用百炼 GLM 5.2 保证代码质量
         const config = { ...MODEL_ROUTING.generate, model: "glm-5.2", maxTokens: 4096 };
-        const stream = await streamChat(config, messages);
 
-        // 实时收集 + 进度推送
-        const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);
+        // GLM 5.2 流式 API 偶发返回空内容，降级为非流式 + 模拟进度
+        bus?.emit({
+          type: "agent:progress",
+          agent: "generate",
+          role: "前端工程师",
+          percent: 10,
+          message: "正在调用 LLM 生成代码，预计 15-30 秒...",
+        });
+
+        const response = await chat(config, messages);
+        const content = response.choices[0]?.message?.content ?? "";
+        const charCount = content.length;
+        const estimatedTokens = Math.round(charCount * 0.75);
+
+        bus?.emit({
+          type: "agent:progress",
+          agent: "generate",
+          role: "前端工程师",
+          percent: 90,
+          message: `代码生成完成，共 ${charCount} 字符，正在解析...`,
+        });
 
         let result: GenerateOutput;
         if (options?.structured) {
           // 结构化解析；失败时降级为单文件 HTML 包装（不阻塞流水线）
-          const artifact = parseCodeArtifact(content) ?? wrapHtmlAsArtifact(extractHtml(content));
+          const artifact = parseCodeArtifact(content) ?? wrapHtmlAsArtifact(content);
           result = {
             files: artifact.files.map((f) => ({ path: f.path, content: f.content })),
             notes:

@@ -4,35 +4,71 @@ import { createLLMExecutors } from "@/lib/agent/llm-executors";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
+import { getUserRole, type UserRole } from "@/lib/db/profiles";
+import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { createAuthClient } from "@/lib/supabase/auth-server";
+
+/** 各角色每日 LLM 生成额度：free=0（仅罐头演示），paid 暂不限量 */
+const DAILY_QUOTA: Record<UserRole, number> = {
+  free: 0,
+  paid: Number.POSITIVE_INFINITY,
+};
+
+const jsonError = (status: number, payload: Record<string, unknown>) =>
+  new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 
 /**
  * POST /api/pipeline
- * 服务端 Agent 流水线入口
+ * 服务端 Agent 流水线入口（LLM 生成，强制登录 + 角色额度检查）
  *
  * 流程：
- * 1. 解析请求体（用户输入）
- * 2. 创建 LLM 执行器（服务端安全调用百炼 API）
- * 3. 运行流水线
- * 4. SSE 流式返回阶段事件
- *
- * TODO: 接入 Supabase Auth + 限流
+ * 1. 鉴权：未登录 401
+ * 2. RBAC：角色从 profiles 表读取，免费账号额度 0 → 403；超限 → 429
+ * 3. 运行流水线，SSE 流式返回阶段事件
+ * 4. 成功后持久化项目/版本/消息并关联 user_id
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   if (!body?.input || typeof body.input !== "string") {
-    return new Response(JSON.stringify({ error: "缺少 input 字段" }), {
-      status: 400,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonError(400, { error: "缺少 input 字段" });
   }
 
   const { input } = body;
 
-  // TODO: 接入真实鉴权后启用
-  // const user = await verifyUser(req);
-  // if (!user) return new Response("Unauthorized", { status: 401 });
-  // if (await isRateLimited(user.id)) return new Response("Too Many", { status: 429 });
+  // 1. 强制登录
+  const auth = await createAuthClient();
+  const {
+    data: { user },
+  } = await auth.auth.getUser();
+  if (!user) {
+    return jsonError(401, {
+      error: "unauthorized",
+      message: "请先登录后再使用 LLM 生成",
+    });
+  }
+
+  // 2. 角色与额度（账号状态以数据库 profiles 表为准）
+  const role = await getUserRole(user.id);
+  const used = await countUsageToday(user.id, "generate");
+  const quota = DAILY_QUOTA[role];
+  if (used >= quota) {
+    return jsonError(role === "free" ? 403 : 429, {
+      error: "quota_exceeded",
+      role,
+      used,
+      quota: quota === Number.POSITIVE_INFINITY ? null : quota,
+      message:
+        role === "free"
+          ? "免费账号仅支持罐头演示（零成本），LLM 生成需付费账号"
+          : "今日生成额度已用完",
+    });
+  }
+
+  // 3. 记用量（生成前记录，防止失败重试绕过限流）
+  await logUsage(user.id, "generate");
 
   // 创建 SSE 流
   const encoder = new TextEncoder();
@@ -66,17 +102,11 @@ export async function POST(req: NextRequest) {
           send({ type: "stage", ...event });
         }
 
-        // 流水线成功后持久化：项目 + 版本 + 消息（任务 3）
-        // 已登录用户关联 user_id；匿名调用仍可生成但不归属任何用户（demo 阶段）
-        // TODO: 接入限流后改为强制登录
+        // 流水线成功后持久化：项目 + 版本 + 消息，关联当前登录用户
         let projectId: string | null = null;
         if (finalState === "done" && result) {
           try {
-            const auth = await createAuthClient();
-            const {
-              data: { user },
-            } = await auth.auth.getUser();
-            const project = await createProject(input, user?.id);
+            const project = await createProject(input, user.id);
             await createVersion(project.id, result.files, 1);
             await createMessage(project.id, "user", input);
             await createMessage(

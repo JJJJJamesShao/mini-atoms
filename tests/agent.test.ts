@@ -19,7 +19,7 @@ describe("runPipeline（罐头执行器）", () => {
       createCannedExecutors("todo"),
     );
     expect(finalState).toBe("done");
-    expect(result?.code).toBe(cannedScenarios[0].generate.code);
+    expect(result?.files).toEqual(cannedScenarios[0].generate.files);
     expect(events.map((e) => e.state)).toEqual([
       "clarify",
       "spec",

@@ -190,7 +190,7 @@ export const cannedScenarios: CannedScenario[] = [
       userStories: ["作为用户，我可以添加待办并勾选完成，以便跟踪日常任务"],
     },
     generate: {
-      code: TODO_HTML,
+      files: [{ path: "index.html", content: TODO_HTML }],
       notes: "原生 JS 实现增删勾选，无持久化（刷新清空）。",
     },
   },
@@ -215,7 +215,7 @@ export const cannedScenarios: CannedScenario[] = [
       userStories: ["作为用户，我可以用方向键玩贪吃蛇并在结束后重开一局"],
     },
     generate: {
-      code: SNAKE_HTML,
+      files: [{ path: "index.html", content: SNAKE_HTML }],
       notes: "15x15 网格，150ms  tick，setInterval 驱动。",
     },
   },
@@ -234,7 +234,7 @@ export const cannedScenarios: CannedScenario[] = [
       userStories: ["作为用户，我可以计时并记录多个计次点"],
     },
     generate: {
-      code: TIMER_HTML,
+      files: [{ path: "index.html", content: TIMER_HTML }],
       notes: "rAF 驱动显示，暂停累计 elapsed，避免计时漂移。",
     },
   },

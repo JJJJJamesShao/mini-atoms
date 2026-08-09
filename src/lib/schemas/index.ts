@@ -22,9 +22,16 @@ export const SpecOutputSchema = z.object({
 });
 export type SpecOutput = z.infer<typeof SpecOutputSchema>;
 
-/** 代码生成节点输出（code 为完整单文件 HTML） */
+/** 文件节点 */
+export const FileSchema = z.object({
+  path: z.string(),
+  content: z.string(),
+});
+export type File = z.infer<typeof FileSchema>;
+
+/** 代码生成节点输出（files 为项目文件列表，当前阶段通常为单文件 index.html） */
 export const GenerateOutputSchema = z.object({
-  code: z.string(),
+  files: z.array(FileSchema),
   notes: z.string(),
 });
 export type GenerateOutput = z.infer<typeof GenerateOutputSchema>;

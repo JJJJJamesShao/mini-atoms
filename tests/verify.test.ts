@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { verifyHtml } from "../src/lib/verify";
+import { verifyHtml, verifyProject } from "../src/lib/verify";
 import { cannedScenarios } from "../src/lib/mock/canned";
 
 const VALID_HTML = `<!DOCTYPE html>
@@ -9,7 +9,7 @@ const VALID_HTML = `<!DOCTYPE html>
 describe("verifyHtml", () => {
   it("合法应用通过（罐头数据全部通过）", () => {
     for (const s of cannedScenarios) {
-      const r = verifyHtml(s.generate.code);
+      const r = verifyProject(s.generate.files);
       expect(r.pass, `${s.title} 应通过`).toBe(true);
       expect(r.errors).toHaveLength(0);
     }
@@ -86,6 +86,30 @@ var b = ;
     // 既缺 DOCTYPE 又有语法错误：应报 syntax 阶段
     const html = `<html><body><script>var x = ;</script></body></html>`;
     const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("syntax");
+  });
+});
+
+describe("verifyProject", () => {
+  it("正常文件列表通过", () => {
+    const r = verifyProject([{ path: "index.html", content: VALID_HTML }]);
+    expect(r.pass).toBe(true);
+  });
+
+  it("缺少 index.html：失败", () => {
+    const r = verifyProject([{ path: "app.js", content: "console.log(1);" }]);
+    expect(r.pass).toBe(false);
+    expect(r.errors[0].rule).toBe("missing-entry");
+  });
+
+  it("index.html 语法错误：失败", () => {
+    const r = verifyProject([
+      {
+        path: "index.html",
+        content: "<html><script>var x = ;</script></html>",
+      },
+    ]);
     expect(r.pass).toBe(false);
     expect(r.stage).toBe("syntax");
   });

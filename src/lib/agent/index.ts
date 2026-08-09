@@ -1,5 +1,6 @@
 import type {
   ClarifyOutput,
+  File,
   GenerateOutput,
   SpecOutput,
   VerifyResult,
@@ -33,7 +34,7 @@ export interface Executors {
     spec: SpecOutput,
     errors?: VerifyResult["errors"],
   ) => Promise<GenerateOutput>;
-  verify: (code: string) => Promise<VerifyResult>;
+  verify: (files: File[]) => Promise<VerifyResult>;
 }
 
 /** approve 节点决策（骨架阶段由调用方注入，默认自动通过） */
@@ -110,10 +111,10 @@ export async function runPipeline(
     generated = await executors.generate(specOut, lastErrors);
 
     enter("verify", { notes: generated.notes });
-    const verifyOut = await executors.verify(generated.code);
+    const verifyOut = await executors.verify(generated.files);
 
     if (verifyOut.pass) {
-      enter("done", { code: generated.code });
+      enter("done", { files: generated.files });
       return { events, finalState: state, result: generated };
     }
 

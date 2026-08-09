@@ -15,10 +15,10 @@ function getBailianClient(): OpenAI {
   return new OpenAI({ apiKey, baseURL });
 }
 
-/** 懒加载 GLM 客户端 */
+/** 懒加载 GLM 客户端 — 硬编码官方端点，避免 env 配置错误 */
 function getGLMClient(): OpenAI {
   const apiKey = process.env.GLM_API_KEY;
-  const baseURL = process.env.GLM_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4";
+  const baseURL = "https://open.bigmodel.cn/api/paas/v4";
 
   if (!apiKey) {
     throw new Error("Missing GLM_API_KEY in environment");

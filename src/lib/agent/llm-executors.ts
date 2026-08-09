@@ -182,8 +182,30 @@ export function createLLMExecutors(
           message: "正在调用 GLM-5.2 生成代码...",
         });
 
-        const stream = await streamGLM(messages, { maxTokens: 4096, temperature: 0.2 });
-        const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);
+        let content: string;
+        let charCount: number;
+        let estimatedTokens: number;
+
+        try {
+          const stream = await streamGLM(messages, { maxTokens: 4096, temperature: 0.2 });
+          const result = await collectStreamWithProgress(stream, bus);
+          content = result.content;
+          charCount = result.charCount;
+          estimatedTokens = result.estimatedTokens;
+        } catch (glmErr) {
+          // GLM 失败时降级到百炼（非流式）
+          console.warn("[GLM Fallback]", glmErr);
+          bus?.emit({
+            type: "agent:thinking",
+            agent: "generate",
+            role: "前端工程师",
+            message: "GLM 服务暂不可用，降级到百炼模型...",
+          });
+          const response = await chat(MODEL_ROUTING.generate, messages);
+          content = response.choices[0]?.message?.content ?? "";
+          charCount = content.length;
+          estimatedTokens = Math.round(charCount * 0.75);
+        }
 
         let result: GenerateOutput;
         if (options?.structured) {

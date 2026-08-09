@@ -1,5 +1,8 @@
 import { getSupabase } from "@/lib/supabase/server";
 
+/** 强制 Node.js runtime */
+export const runtime = "nodejs";
+
 /** GET /api/users/count — 公开接口：返回当前注册用户总数 */
 export async function GET() {
   try {

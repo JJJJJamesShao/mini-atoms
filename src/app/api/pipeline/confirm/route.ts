@@ -2,6 +2,9 @@ import { NextRequest } from "next/server";
 import { createAuthClient } from "@/lib/supabase/auth-server";
 import { resolveApproval } from "../gate";
 
+/** 强制 Node.js runtime */
+export const runtime = "nodejs";
+
 const jsonError = (status: number, payload: Record<string, unknown>) =>
   new Response(JSON.stringify(payload), {
     status,

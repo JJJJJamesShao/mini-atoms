@@ -130,8 +130,10 @@ export function createLLMExecutors(
       memory.clarify.add({ topic: MessageTopic.SYSTEM, content: input, metadata: { direction: "in" } });
       const messages = buildClarifyPrompt(input);
       const config = MODEL_ROUTING.clarify;
+      console.log("[DEBUG] Clarify 请求:", { model: config.model, promptLength: messages[1]?.content?.length ?? 0 });
       const response = await chat(config, messages);
       const text = response.choices[0]?.message?.content ?? "";
+      console.log("[DEBUG] Clarify 响应:", { textLength: text.length, textPrefix: text.slice(0, 100) });
       const result = extractJson<ClarifyOutput>(text);
       memory.clarify.add({ topic: MessageTopic.PRD, content: JSON.stringify(result), metadata: { direction: "out" } });
       emit({ type: "agent:complete", agent: "clarify", role: "产品经理", output: result });
@@ -143,8 +145,10 @@ export function createLLMExecutors(
       memory.spec.add({ topic: MessageTopic.PRD, content: JSON.stringify(clarify), metadata: { direction: "in" } });
       const messages = buildSpecPrompt(clarify.summary);
       const config = MODEL_ROUTING.spec;
+      console.log("[DEBUG] Spec 请求:", { model: config.model, promptLength: messages[1]?.content?.length ?? 0 });
       const response = await chat(config, messages);
       const text = response.choices[0]?.message?.content ?? "";
+      console.log("[DEBUG] Spec 响应:", { textLength: text.length, textPrefix: text.slice(0, 100) });
       const result = extractJson<SpecOutput>(text);
       memory.spec.add({ topic: MessageTopic.ARCH_SPEC, content: JSON.stringify(result), metadata: { direction: "out" } });
       emit({ type: "agent:complete", agent: "spec", role: "架构师", output: result });
@@ -168,8 +172,8 @@ export function createLLMExecutors(
         const messages = options?.structured
           ? buildGameGeneratePrompt(spec, errors)
           : buildGeneratePrompt(spec, errors);
-        // 使用百炼 GLM 5.2 保证代码质量
-        const config = { ...MODEL_ROUTING.generate, model: "glm-5.2", maxTokens: 4096 };
+        const config = MODEL_ROUTING.generate;
+        console.log("[DEBUG] Generate 使用模型:", config.model);
 
         // GLM 5.2 流式 API 偶发返回空内容，降级为非流式 + 模拟进度
         bus?.emit({
@@ -180,7 +184,23 @@ export function createLLMExecutors(
           message: "正在调用 LLM 生成代码，预计 15-30 秒...",
         });
 
+        console.log("[DEBUG] Generate 请求:", {
+          model: config.model,
+          maxTokens: config.maxTokens,
+          temperature: config.temperature,
+          promptLength: messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0),
+          isStructured: options?.structured,
+          messageCount: messages.length,
+        });
+
         const response = await chat(config, messages);
+        
+        console.log("[DEBUG] Generate 响应:", {
+          status: response.choices?.[0]?.finish_reason,
+          contentLength: response.choices?.[0]?.message?.content?.length ?? 0,
+          contentPrefix: response.choices?.[0]?.message?.content?.slice(0, 200) ?? "EMPTY",
+        });
+
         const content = response.choices[0]?.message?.content ?? "";
         const charCount = content.length;
         const estimatedTokens = Math.round(charCount * 0.75);

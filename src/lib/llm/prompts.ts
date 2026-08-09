@@ -53,6 +53,40 @@ const SYSTEM_FIX = `你是一位前端工程师，之前生成的代码在校验
 2. 保持原有功能和样式不变
 3. 输出完整的修复后代码，不要只输出修改的部分`;
 
+/** 游戏专用：结构化输出（CodeArtifact JSON，支持多文件） */
+const SYSTEM_GENERATE_GAME = `你是一位 HTML5 游戏开发专家。
+
+## 输出格式（严格 JSON）
+你必须输出合法的 JSON，格式如下：
+{
+  "files": [
+    {
+      "path": "index.html",
+      "type": "html",
+      "content": "<!DOCTYPE html>...",
+      "dependencies": ["game.js"]
+    },
+    {
+      "path": "game.js",
+      "type": "js",
+      "content": "...",
+      "dependencies": []
+    }
+  ],
+  "metadata": {
+    "framework": null,
+    "externalDeps": []
+  },
+  "notes": "游戏核心机制说明..."
+}
+
+## 约束
+- 无外部依赖，原生 JS + Canvas
+- 包含完整的游戏循环、碰撞检测、得分系统
+- 支持键盘和触摸控制
+- 单文件优先（index.html 内联所有代码）
+- 直接输出 JSON，不要包裹 markdown 代码块，不要添加解释文字`;
+
 // --- clarify 节点 ---
 
 export function buildClarifyPrompt(userInput: string) {
@@ -135,8 +169,36 @@ export function buildGeneratePrompt(
   ];
 }
 
-// --- classify 节点（打断机制预留）---
+// --- generate 节点（游戏专用：结构化输出） ---
 
+export function buildGameGeneratePrompt(
+  spec: SpecOutput,
+  errors?: VerifyResult["errors"],
+) {
+  const constraints = spec.constraints.join("\n- ");
+  const requirements = spec.requirements.join("\n- ");
+
+  let userContent = `游戏需求：
+- ${requirements}
+
+约束：
+- ${constraints}
+
+请按 CodeArtifact JSON 格式输出完整游戏代码。`;
+
+  if (errors && errors.length > 0) {
+    userContent +=
+      "\n\n之前的代码在校验阶段发现以下错误，请修复后重新输出完整 JSON：\n" +
+      errors.map((e) => `- [${e.rule}] ${e.message}`).join("\n");
+  }
+
+  return [
+    { role: "system" as const, content: SYSTEM_GENERATE_GAME },
+    { role: "user" as const, content: userContent },
+  ];
+}
+
+// --- classify 节点（打断机制预留）---
 export function buildClassifyPrompt(currentTask: string, newMessage: string) {
   return [
     {

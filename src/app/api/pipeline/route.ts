@@ -3,6 +3,7 @@ import { createLLMExecutors } from "@/lib/agent/llm-executors";
 import { AgentEventBus } from "@/lib/agent/bus";
 import { runSOP } from "@/lib/agent/engine";
 import { selectSOP } from "@/lib/agent/router";
+import { createRoles } from "@/lib/agent/role";
 import type { SpecOutput } from "@/lib/schemas";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
@@ -95,8 +96,18 @@ export async function POST(req: NextRequest) {
         // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）
         const sop = selectSOP(input);
 
-        // LLM 执行器：节点进度经 EventBus 实时推送到前端
-        const executors = createLLMExecutors(bus);
+        // 本次运行的角色实例（记忆隔离）+ 共享 Memory 的 LLM 执行器；
+        // 游戏 SOP 强制结构化 JSON 输出（CodeArtifact）
+        const roles = createRoles();
+        const executors = createLLMExecutors(bus, {
+          structured: sop.id === "game",
+          memories: {
+            clarify: roles.pm.memory,
+            spec: roles.architect.memory,
+            generate: roles.engineer.memory,
+            verify: roles.reviewer.memory,
+          },
+        });
 
         // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm
         //（仅含 approve 步骤的 SOP 会调用；game SOP 自动跳过）
@@ -124,6 +135,7 @@ export async function POST(req: NextRequest) {
           executors,
           approver,
           bus,
+          roles,
         );
 
         // 流水线成功后持久化

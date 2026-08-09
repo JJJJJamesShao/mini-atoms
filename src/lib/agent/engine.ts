@@ -10,7 +10,8 @@
 
 import type { Executors, Approver } from "./index";
 import type { AgentEventBus } from "./bus";
-import { ROLES } from "./role";
+import { createRoles, ROLES, type Role, type RoleId } from "./role";
+import { MessageTopic } from "./message";
 import type { SOPCondition, SOPConfig, SOPStep } from "./sop";
 import type {
   ClarifyOutput,
@@ -43,13 +44,22 @@ interface ExecutionContext {
   fixAttempts: number;
 }
 
+/**
+ * @param roles 本次运行使用的角色实例（持有各自 Memory）；
+ *   不传则内部创建——调用方需要共享 Memory 给执行器时应显式传入
+ */
 export async function runSOP(
   input: string,
   sop: SOPConfig,
   executors: Executors,
   approver?: Approver,
   bus?: AgentEventBus,
+  roles?: Record<RoleId, Role>,
 ): Promise<SOPRunResult> {
+  const runRoles = roles ?? createRoles();
+  /** 本次流水线会话 id：Topic 消息按会话隔离历史 */
+  const sessionId = crypto.randomUUID();
+
   const ctx: ExecutionContext = {
     input,
     clarify: null,
@@ -83,7 +93,22 @@ export async function runSOP(
       return { sop, finalState: "fail", reason: "unknown" };
     }
 
+    const role = step.role === "system" ? null : runRoles[step.role];
+
+    // Agent 间通信消费端：执行前从 Bus 拉取订阅 Topic 的历史消息写入 Memory
+    if (role && bus) role.prepareContext(bus, sessionId);
+
     const output = await executeStep(step, ctx, executors, approver, bus);
+
+    // Agent 间通信生产端：步骤产物按 Topic 发布（PRD/ARCH_SPEC/CODE/REVIEW）
+    if (bus) {
+      bus.publish(stepToTopic(step), {
+        from: role?.config.name ?? "系统",
+        payload: output,
+        sessionId,
+      });
+    }
+
     const next = resolveNext(step, output);
 
     if (next === "fail") {
@@ -114,6 +139,23 @@ function matchCondition(condition: SOPCondition, fieldValue: unknown): boolean {
   return condition.operator === "eq"
     ? actual === condition.value
     : actual !== condition.value;
+}
+
+/** 步骤产物 → 消息 Topic（Agent 间通信路由表） */
+function stepToTopic(step: SOPStep): MessageTopic {
+  switch (step.action) {
+    case "clarify":
+      return MessageTopic.PRD;
+    case "spec":
+      return MessageTopic.ARCH_SPEC;
+    case "generate":
+      return MessageTopic.CODE;
+    case "verify":
+      return MessageTopic.REVIEW;
+    default:
+      // approve/fix 等系统流转事件
+      return MessageTopic.SYSTEM;
+  }
 }
 
 /** 跳转 fail 时按步骤类型给出原因（与前端文案映射保持一致） */

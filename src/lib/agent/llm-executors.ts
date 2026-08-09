@@ -5,11 +5,18 @@ import { chat, streamChat } from "@/lib/llm/client";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
+  buildGameGeneratePrompt,
   buildGeneratePrompt,
   buildSpecPrompt,
 } from "@/lib/llm/prompts";
+import {
+  parseCodeArtifact,
+  wrapHtmlAsArtifact,
+} from "@/lib/schemas/code-artifact";
 import { verifyProject } from "../verify";
 import type { AgentEvent, AgentEventBus } from "./bus";
+import { AgentMemory } from "./memory";
+import { MessageTopic } from "./message";
 
 /**
  * 实时收集流式响应，同时 emit 进度事件
@@ -93,34 +100,53 @@ function extractHtml(text: string): string {
 }
 
 /**
- * 创建真实 LLM 执行器（接入 Agent EventBus）
- * 
+ * 创建真实 LLM 执行器（接入 Agent EventBus + 角色 Memory）
+ *
  * @param bus - 事件总线，用于 emit 中间进度事件
+ * @param options.structured - true 时（游戏 SOP）强制结构化 JSON 输出（CodeArtifact）
+ * @param options.memories - 各节点角色的记忆实例（由调用方按 Role 注入）；
+ *   缺省时每节点各自创建——保证单次运行内记忆隔离、跨运行不串扰
  */
-export function createLLMExecutors(bus?: AgentEventBus): Executors {
+export function createLLMExecutors(
+  bus?: AgentEventBus,
+  options?: {
+    structured?: boolean;
+    memories?: Partial<Record<"clarify" | "spec" | "generate" | "verify", AgentMemory>>;
+  },
+): Executors {
   const emit = (event: Omit<AgentEvent, "timestamp">) => {
     bus?.emit(event);
+  };
+  const memory = {
+    clarify: options?.memories?.clarify ?? new AgentMemory(),
+    spec: options?.memories?.spec ?? new AgentMemory(),
+    generate: options?.memories?.generate ?? new AgentMemory(),
+    verify: options?.memories?.verify ?? new AgentMemory(),
   };
 
   return {
     clarify: async (input: string) => {
       emit({ type: "agent:start", agent: "clarify", role: "产品经理", input });
+      memory.clarify.add({ topic: MessageTopic.SYSTEM, content: input, metadata: { direction: "in" } });
       const messages = buildClarifyPrompt(input);
       const config = MODEL_ROUTING.clarify;
       const response = await chat(config, messages);
       const text = response.choices[0]?.message?.content ?? "";
       const result = extractJson<ClarifyOutput>(text);
+      memory.clarify.add({ topic: MessageTopic.PRD, content: JSON.stringify(result), metadata: { direction: "out" } });
       emit({ type: "agent:complete", agent: "clarify", role: "产品经理", output: result });
       return result;
     },
 
     spec: async (clarify) => {
       emit({ type: "agent:start", agent: "spec", role: "架构师", input: clarify });
+      memory.spec.add({ topic: MessageTopic.PRD, content: JSON.stringify(clarify), metadata: { direction: "in" } });
       const messages = buildSpecPrompt(clarify.summary);
       const config = MODEL_ROUTING.spec;
       const response = await chat(config, messages);
       const text = response.choices[0]?.message?.content ?? "";
       const result = extractJson<SpecOutput>(text);
+      memory.spec.add({ topic: MessageTopic.ARCH_SPEC, content: JSON.stringify(result), metadata: { direction: "out" } });
       emit({ type: "agent:complete", agent: "spec", role: "架构师", output: result });
       return result;
     },
@@ -132,28 +158,50 @@ export function createLLMExecutors(bus?: AgentEventBus): Executors {
         role: "前端工程师",
         input: { spec, errors },
       });
+      memory.generate.add({ topic: MessageTopic.ARCH_SPEC, content: JSON.stringify(spec), metadata: { direction: "in" } });
+      if (errors?.length) {
+        memory.generate.add({ topic: MessageTopic.REVIEW, content: JSON.stringify(errors), metadata: { direction: "in" } });
+      }
 
       try {
-        const messages = buildGeneratePrompt(spec, errors);
+        // 游戏 SOP：结构化 JSON 输出；其他 SOP：单文件 HTML
+        const messages = options?.structured
+          ? buildGameGeneratePrompt(spec, errors)
+          : buildGeneratePrompt(spec, errors);
         // 使用百炼 GLM 5.2 保证代码质量
         const config = { ...MODEL_ROUTING.generate, model: "glm-5.2", maxTokens: 4096 };
         const stream = await streamChat(config, messages);
-        
+
         // 实时收集 + 进度推送
         const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);
-        const html = extractHtml(content);
 
-        const result: GenerateOutput = {
-          files: [{ path: "index.html", content: html }],
-          notes: errors
-            ? `修复后重新生成，修复 ${errors.length} 处错误，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`
-            : `首次生成，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`,
-        };
+        let result: GenerateOutput;
+        if (options?.structured) {
+          // 结构化解析；失败时降级为单文件 HTML 包装（不阻塞流水线）
+          const artifact = parseCodeArtifact(content) ?? wrapHtmlAsArtifact(extractHtml(content));
+          result = {
+            files: artifact.files.map((f) => ({ path: f.path, content: f.content })),
+            notes:
+              (artifact.notes ? `${artifact.notes}；` : "") +
+              (errors
+                ? `修复后重新生成，修复 ${errors.length} 处错误，${artifact.files.length} 个文件共 ${charCount} 字符（约 ${estimatedTokens} tokens）`
+                : `结构化生成 ${artifact.files.length} 个文件，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`),
+          };
+        } else {
+          const html = extractHtml(content);
+          result = {
+            files: [{ path: "index.html", content: html }],
+            notes: errors
+              ? `修复后重新生成，修复 ${errors.length} 处错误，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`
+              : `首次生成，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`,
+          };
+        }
 
-        emit({ 
-          type: "agent:complete", 
-          agent: "generate", 
-          role: "前端工程师", 
+        memory.generate.add({ topic: MessageTopic.CODE, content: JSON.stringify(result), metadata: { direction: "out" } });
+        emit({
+          type: "agent:complete",
+          agent: "generate",
+          role: "前端工程师",
           output: result,
           message: `生成完成：${charCount} 字符（约 ${estimatedTokens} tokens）`,
         });
@@ -171,7 +219,9 @@ export function createLLMExecutors(bus?: AgentEventBus): Executors {
 
     verify: async (files) => {
       emit({ type: "agent:start", agent: "verify", role: "代码审查员", input: files });
+      memory.verify.add({ topic: MessageTopic.CODE, content: JSON.stringify(files), metadata: { direction: "in" } });
       const result = verifyProject(files);
+      memory.verify.add({ topic: MessageTopic.REVIEW, content: JSON.stringify(result), metadata: { direction: "out" } });
       emit({ type: "agent:complete", agent: "verify", role: "代码审查员", output: result });
       return result;
     },

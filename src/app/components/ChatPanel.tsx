@@ -78,7 +78,8 @@ export default function ChatPanel({
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
+            // 中文输入法组词期间的 Enter 是确认候选词，不应触发发送
+            if (e.key === "Enter" && !e.nativeEvent.isComposing) submit();
           }}
           disabled={disabled}
           placeholder="输入需求..."

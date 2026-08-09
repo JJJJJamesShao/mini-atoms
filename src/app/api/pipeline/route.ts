@@ -4,6 +4,7 @@ import { createLLMExecutors } from "@/lib/agent/llm-executors";
 import { createProject } from "@/lib/db/projects";
 import { createVersion } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
+import { createAuthClient } from "@/lib/supabase/auth-server";
 
 /**
  * POST /api/pipeline
@@ -66,11 +67,16 @@ export async function POST(req: NextRequest) {
         }
 
         // 流水线成功后持久化：项目 + 版本 + 消息（任务 3）
-        // TODO: 接入 Auth 后关联 user_id；持久化失败不阻断生成结果返回
+        // 已登录用户关联 user_id；匿名调用仍可生成但不归属任何用户（demo 阶段）
+        // TODO: 接入限流后改为强制登录
         let projectId: string | null = null;
         if (finalState === "done" && result) {
           try {
-            const project = await createProject(input);
+            const auth = await createAuthClient();
+            const {
+              data: { user },
+            } = await auth.auth.getUser();
+            const project = await createProject(input, user?.id);
             await createVersion(project.id, result.files, 1);
             await createMessage(project.id, "user", input);
             await createMessage(

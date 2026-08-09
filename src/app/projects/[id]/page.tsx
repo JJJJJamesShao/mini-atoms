@@ -1,23 +1,24 @@
 import Link from "next/link";
-import AuthGuard from "@/app/components/AuthGuard";
+import { redirect } from "next/navigation";
 import PreviewFrame from "@/app/components/PreviewFrame";
 import { getProject } from "@/lib/db/projects";
 import { getVersions } from "@/lib/db/versions";
+import { createAuthClient } from "@/lib/supabase/auth-server";
 
 export const dynamic = "force-dynamic";
 
-export default function ProjectPage(props: {
+/** 项目详情：服务端校验登录态 + 归属（user_id 为 null 的历史演示数据对所有登录用户可见） */
+export default async function ProjectPage({
+  params,
+}: {
   params: Promise<{ id: string }>;
 }) {
-  return (
-    <AuthGuard>
-      <ProjectDetail {...props} />
-    </AuthGuard>
-  );
-}
+  const auth = await createAuthClient();
+  const {
+    data: { user },
+  } = await auth.auth.getUser();
+  if (!user) redirect("/auth/login");
 
-/** 项目详情：版本列表 + 最新版本预览（简化版，只读） */
-async function ProjectDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
   let project;
@@ -37,6 +38,9 @@ async function ProjectDetail({ params }: { params: Promise<{ id: string }> }) {
       </main>
     );
   }
+
+  // 归属校验（redirect 抛出特殊异常，必须在 try/catch 之外调用）
+  if (project.user_id && project.user_id !== user.id) redirect("/projects");
 
   const latest = versions[versions.length - 1];
   const html =

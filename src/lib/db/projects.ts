@@ -31,6 +31,19 @@ export async function getProjects(userId?: string): Promise<ProjectRow[]> {
   return (data ?? []) as ProjectRow[];
 }
 
+/** 按用户查询项目；user_id 为 null 的视为历史演示数据，对所有登录用户可见 */
+export async function getProjectsForUser(
+  userId: string,
+): Promise<ProjectRow[]> {
+  const { data, error } = await getSupabase()
+    .from("projects")
+    .select("*")
+    .or(`user_id.eq.${userId},user_id.is.null`)
+    .order("created_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as ProjectRow[];
+}
+
 export async function getProject(id: string): Promise<ProjectRow> {
   const { data, error } = await getSupabase()
     .from("projects")

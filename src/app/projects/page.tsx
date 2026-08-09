@@ -1,23 +1,22 @@
 import Link from "next/link";
-import AuthGuard from "@/app/components/AuthGuard";
-import { getProjects } from "@/lib/db/projects";
+import { redirect } from "next/navigation";
+import { getProjectsForUser } from "@/lib/db/projects";
 import { getVersions } from "@/lib/db/versions";
+import { createAuthClient } from "@/lib/supabase/auth-server";
 
 export const dynamic = "force-dynamic";
 
-export default function ProjectsPage() {
-  return (
-    <AuthGuard>
-      <ProjectsList />
-    </AuthGuard>
-  );
-}
+/** 项目列表：服务端先校验登录态（未登录 redirect），再按当前用户取数 */
+export default async function ProjectsPage() {
+  const auth = await createAuthClient();
+  const {
+    data: { user },
+  } = await auth.auth.getUser();
+  if (!user) redirect("/auth/login");
 
-/** 项目列表：服务端直读 Supabase（TODO: 接入 Auth 后按 user_id 过滤） */
-async function ProjectsList() {
   let rows: { id: string; title: string; created_at: string; count: number }[];
   try {
-    const projects = await getProjects();
+    const projects = await getProjectsForUser(user.id);
     rows = await Promise.all(
       projects.map(async (p) => ({
         id: p.id,

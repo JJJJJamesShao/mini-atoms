@@ -174,9 +174,11 @@ export async function POST(req: NextRequest) {
             : null,
         });
       } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error("[Pipeline Error]", errorMsg, err);
         send({
           type: "error",
-          message: err instanceof Error ? err.message : String(err),
+          message: errorMsg,
         });
       } finally {
         controller.close();

@@ -216,6 +216,7 @@ export function useWorkspace() {
             message?: string;
             percent?: number;
             output?: unknown;
+            error?: string;
           };
           const agentStage = ae.agent as StageName;
 
@@ -250,7 +251,7 @@ export function useWorkspace() {
           }
 
           if (ae.type === "agent:error") {
-            setStage(agentStage, "failed", ae.message ?? "执行出错");
+            setStage(agentStage, "failed", ae.error ?? ae.message ?? "执行出错");
             return;
           }
 
@@ -280,7 +281,9 @@ export function useWorkspace() {
         } else if (type === "persist_error") {
           updateVersion(id, (v) => ({ ...v, note: `${v.note ?? ""}（保存到云端失败：${event.message}）` }));
         } else if (type === "error") {
-          failVersion(`服务端错误：${event.message}`);
+          const msg = `服务端错误：${event.message}`;
+          finalizeStages("failed", msg);
+          failVersion(msg);
         }
       };
 

@@ -219,11 +219,13 @@ export function createLLMExecutors(
         });
         return result;
       } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error("[Generate Error]", errorMsg, err);
         bus?.emit({
           type: "agent:error",
           agent: "generate",
           role: "前端工程师",
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMsg,
         });
         throw err;
       }

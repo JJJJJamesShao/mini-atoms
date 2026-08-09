@@ -25,6 +25,23 @@ const SYSTEM_GENERATE = `你是一位全栈前端工程师，精通 HTML/CSS/Jav
 7. 应用必须美观、交互流畅
 8. 文件大小不超过 200KB
 
+**结构标记（必须在对应位置插入）**：
+在生成过程中，按以下顺序输出，并在每个部分前插入标记注释：
+
+<!-- SECTION: HEAD -->
+<!DOCTYPE html><html><head>...</head>
+
+<!-- SECTION: CSS -->
+<style>...</style>
+
+<!-- SECTION: BODY -->
+<body>...</body>
+
+<!-- SECTION: JS -->
+<script>...</script></html>
+
+这些标记用于系统跟踪生成进度，请不要省略。
+
 **输出格式**：
 直接输出 HTML 代码，不要包裹在 markdown 代码块中，不要添加任何解释文字。`;
 

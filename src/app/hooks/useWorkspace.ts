@@ -43,7 +43,7 @@ export interface ExecutionLog {
   id: number;
   versionId: number;
   stage: StageName;
-  phase: "start" | "end";
+  phase: "start" | "end" | "progress";
   detail?: string;
   timestamp: number;
 }
@@ -155,7 +155,7 @@ export function useWorkspace() {
         }));
 
       /** 推送全局执行日志 */
-      const pushLog = (stage: StageName, phase: "start" | "end", detail?: string) => {
+      const pushLog = (stage: StageName, phase: "start" | "end" | "progress", detail?: string) => {
         const entry: ExecutionLog = {
           id: ++logId.current,
           versionId: id,
@@ -228,9 +228,13 @@ export function useWorkspace() {
             agent: string;
             role?: string;
             message?: string;
+            percent?: number;
           };
-          if (ae.type === "agent:thinking" && ae.agent === "generate") {
-            setStage("generate", "active", ae.message || "正在生成代码...");
+          if (ae.agent === "generate") {
+            const msg = ae.message || (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
+            setStage("generate", "active", msg);
+            // 将 thinking/progress 事件也记入日志
+            pushLog("generate", "progress", msg);
           }
         } else if (type === "approve_needed") {
           approvalSessionId.current = event.sessionId as string;

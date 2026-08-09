@@ -15,6 +15,7 @@ export default function Home() {
     selectedVersionId,
     awaitingApproval,
     running,
+    executionLogs,
     startProject,
     sendFollowUp,
     openScenario,
@@ -89,6 +90,7 @@ export default function Home() {
               selectedVersionId={selectedVersionId}
               awaitingApproval={awaitingApproval}
               running={running}
+              executionLogs={executionLogs}
               onSelectVersion={selectVersion}
               onApprove={approve}
               onReject={reject}

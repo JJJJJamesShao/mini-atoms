@@ -12,17 +12,62 @@ import { verifyProject } from "../verify";
 import type { AgentEventBus } from "./bus";
 
 /**
- * 从流式响应中提取完整内容
- * TODO: 后续改为 SSE 逐字推送，当前先收集完整结果
+ * 实时收集流式响应，同时 emit 进度事件
+ * 
+ * @param stream - OpenAI 流式响应
+ * @param bus - 事件总线
+ * @returns 完整文本 + 统计信息
  */
-async function collectStream(
+async function collectStreamWithProgress(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
-): Promise<string> {
+  bus?: AgentEventBus,
+): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
   let content = "";
+  let lastEmitLength = 0;
+  const EMIT_INTERVAL = 200; // 每 200 字符 emit 一次
+
+  // 子步骤解析：检测 <!-- SECTION: XXX --> 标记
+  const SECTION_MARKERS = [
+    { pattern: /<!--\s*SECTION:\s*HEAD\s*-->/i, name: "HTML 结构", desc: "生成 <head> 和 DOCTYPE" },
+    { pattern: /<!--\s*SECTION:\s*CSS\s*-->/i, name: "CSS 样式", desc: "生成内联样式" },
+    { pattern: /<!--\s*SECTION:\s*BODY\s*-->/i, name: "页面主体", desc: "生成 <body> 内容" },
+    { pattern: /<!--\s*SECTION:\s*JS\s*-->/i, name: "JavaScript", desc: "生成交互脚本" },
+  ];
+  const emittedSections = new Set<string>();
+
   for await (const chunk of stream) {
-    content += chunk.choices[0]?.delta?.content ?? "";
+    const delta = chunk.choices[0]?.delta?.content ?? "";
+    content += delta;
+
+    // 每 200 字符 emit 进度
+    if (content.length - lastEmitLength >= EMIT_INTERVAL) {
+      lastEmitLength = content.length;
+      const estimatedTokens = Math.round(content.length * 0.75); // 中文字符估算
+      bus?.emit({
+        type: "agent:progress",
+        agent: "generate",
+        role: "前端工程师",
+        percent: Math.min(Math.round((content.length / 3000) * 100), 99),
+        message: `已生成 ${content.length} 字符（约 ${estimatedTokens} tokens）...`,
+      });
+    }
+
+    // 检测子步骤标记
+    for (const marker of SECTION_MARKERS) {
+      if (!emittedSections.has(marker.name) && marker.pattern.test(content)) {
+        emittedSections.add(marker.name);
+        bus?.emit({
+          type: "agent:thinking",
+          agent: "generate",
+          role: "前端工程师",
+          message: `正在生成 ${marker.name}：${marker.desc}`,
+        });
+      }
+    }
   }
-  return content;
+
+  const estimatedTokens = Math.round(content.length * 0.75);
+  return { content, charCount: content.length, estimatedTokens };
 }
 
 /** 尝试从 LLM 输出中解析 JSON */
@@ -53,7 +98,7 @@ function extractHtml(text: string): string {
  * @param bus - 事件总线，用于 emit 中间进度事件
  */
 export function createLLMExecutors(bus?: AgentEventBus): Executors {
-  const emit = (event: { type: string; agent: string; role?: string; input?: unknown; output?: unknown; message?: string }) => {
+  const emit = (event: { type: string; agent: string; role?: string; input?: unknown; output?: unknown; message?: string; percent?: number }) => {
     bus?.emit(event as any);
   };
 
@@ -88,38 +133,39 @@ export function createLLMExecutors(bus?: AgentEventBus): Executors {
         input: { spec, errors },
       });
 
-      // 模拟进度事件：每 3 秒推送一次，让前端知道系统还活着
-      const progressTimer = bus
-        ? setInterval(() => {
-            bus.emit({
-              type: "agent:thinking",
-              agent: "generate",
-              role: "前端工程师",
-              message: errors?.length
-                ? "正在修复代码并重新生成..."
-                : "正在生成 HTML 代码，请稍候...",
-            });
-          }, 3000)
-        : null;
-
       try {
         const messages = buildGeneratePrompt(spec, errors);
-        const config = MODEL_ROUTING.generate;
+        // 使用 flash 模型提升速度（3.8-max 太慢，会卡住 3-4 分钟）
+        const config = { ...MODEL_ROUTING.generate, model: "qwen3.6-flash", maxTokens: 4096 };
         const stream = await streamChat(config, messages);
-        const text = await collectStream(stream);
-        const html = extractHtml(text);
+        
+        // 实时收集 + 进度推送
+        const { content, charCount, estimatedTokens } = await collectStreamWithProgress(stream, bus);
+        const html = extractHtml(content);
 
         const result: GenerateOutput = {
           files: [{ path: "index.html", content: html }],
           notes: errors
-            ? `修复后重新生成，修复 ${errors.length} 处错误`
-            : "首次生成",
+            ? `修复后重新生成，修复 ${errors.length} 处错误，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`
+            : `首次生成，共 ${charCount} 字符（约 ${estimatedTokens} tokens）`,
         };
 
-        emit({ type: "agent:complete", agent: "generate", role: "前端工程师", output: result });
+        emit({ 
+          type: "agent:complete", 
+          agent: "generate", 
+          role: "前端工程师", 
+          output: result,
+          message: `生成完成：${charCount} 字符（约 ${estimatedTokens} tokens）`,
+        });
         return result;
-      } finally {
-        if (progressTimer) clearInterval(progressTimer);
+      } catch (err) {
+        bus?.emit({
+          type: "agent:error",
+          agent: "generate",
+          role: "前端工程师",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
       }
     },
 

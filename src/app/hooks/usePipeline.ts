@@ -64,8 +64,8 @@ export function usePipeline() {
 
   const pushMessage = useCallback(
     (role: ChatMessage["role"], content: string) => {
-      msgId.current += 1;
-      setMessages((prev) => [...prev, { id: msgId.current, role, content }]);
+      const id = ++msgId.current;
+      setMessages((prev) => [...prev, { id, role, content }]);
     },
     [],
   );

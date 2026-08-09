@@ -15,10 +15,11 @@ function getBailianClient(): OpenAI {
   return new OpenAI({ apiKey, baseURL });
 }
 
-/** 懒加载 GLM 客户端 — 硬编码官方端点，避免 env 配置错误 */
+/** 懒加载 GLM 客户端 */
 function getGLMClient(): OpenAI {
   const apiKey = process.env.GLM_API_KEY;
-  const baseURL = "https://open.bigmodel.cn/api/paas/v4";
+  const baseURL =
+    process.env.GLM_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4";
 
   if (!apiKey) {
     throw new Error("Missing GLM_API_KEY in environment");
@@ -69,8 +70,9 @@ export async function streamGLM(
   options?: { maxTokens?: number; temperature?: number },
 ) {
   const client = getGLMClient();
+  const model = process.env.GLM_5_2 ?? "glm-5.2";
   return client.chat.completions.create({
-    model: "glm-5.2",
+    model,
     messages,
     max_tokens: options?.maxTokens ?? 131072,
     temperature: options?.temperature ?? 0.2,
@@ -84,8 +86,9 @@ export async function chatGLM(
   options?: { maxTokens?: number; temperature?: number },
 ) {
   const client = getGLMClient();
+  const model = process.env.GLM_5_2 ?? "glm-5.2";
   return client.chat.completions.create({
-    model: "glm-5.2",
+    model,
     messages,
     max_tokens: options?.maxTokens ?? 131072,
     temperature: options?.temperature ?? 0.2,

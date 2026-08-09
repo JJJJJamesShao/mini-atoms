@@ -4,9 +4,9 @@ import { AgentEventBus } from "@/lib/agent/bus";
 import { runSOP } from "@/lib/agent/engine";
 import { selectSOP } from "@/lib/agent/router";
 import { createRoles } from "@/lib/agent/role";
-import type { SpecOutput } from "@/lib/schemas";
+import type { File, SpecOutput } from "@/lib/schemas";
 import { createProject } from "@/lib/db/projects";
-import { createVersion } from "@/lib/db/versions";
+import { createVersion, getVersions } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { createAuthClient } from "@/lib/supabase/auth-server";
@@ -24,6 +24,10 @@ const jsonError = (status: number, payload: Record<string, unknown>) =>
 /**
  * POST /api/pipeline
  * 服务端 Agent 流水线入口（强制登录 + 每日额度限制）
+ *
+ * 支持两种模式：
+ * 1. 首次生成：{ input } → 创建新项目 + 版本 1
+ * 2. 对话迭代：{ input, projectId, currentFiles } → 追加版本
  */
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
@@ -31,7 +35,11 @@ export async function POST(req: NextRequest) {
     return jsonError(400, { error: "缺少 input 字段" });
   }
 
-  const { input } = body;
+  const { input, projectId, currentFiles } = body as {
+    input: string;
+    projectId?: string;
+    currentFiles?: File[];
+  };
 
   // 1. 强制登录
   const auth = await createAuthClient();
@@ -119,6 +127,9 @@ export async function POST(req: NextRequest) {
           sop: { id: sop.id, name: sop.name, steps: displaySteps },
         });
 
+        // 对话迭代：传入当前代码，让 LLM 基于现有代码修改
+        const initialFiles: File[] | undefined = currentFiles;
+
         const { finalState, reason, result } = await runSOP(
           input,
           sop,
@@ -126,22 +137,43 @@ export async function POST(req: NextRequest) {
           approver,
           bus,
           roles,
+          initialFiles,
         );
 
         // 流水线成功后持久化
-        let projectId: string | null = null;
+        let finalProjectId: string | null = null;
         if (finalState === "done" && result) {
           try {
-            const project = await createProject(input, user.id);
-            await createVersion(project.id, result.files, 1);
-            await createMessage(project.id, "user", input);
-            await createMessage(
-              project.id,
-              "assistant",
-              result.notes || "生成完成",
-            );
-            projectId = project.id;
-            send({ type: "project_created", projectId });
+            if (projectId) {
+              // 对话迭代：追加版本到现有项目
+              const versions = await getVersions(projectId);
+              const nextVersionNo = versions.length + 1;
+              await createVersion(projectId, result.files, nextVersionNo);
+              await createMessage(projectId, "user", input);
+              await createMessage(
+                projectId,
+                "assistant",
+                result.notes || "修改完成",
+              );
+              finalProjectId = projectId;
+              send({
+                type: "project_updated",
+                projectId,
+                versionNo: nextVersionNo,
+              });
+            } else {
+              // 首次生成：创建新项目
+              const project = await createProject(input, user.id);
+              await createVersion(project.id, result.files, 1);
+              await createMessage(project.id, "user", input);
+              await createMessage(
+                project.id,
+                "assistant",
+                result.notes || "生成完成",
+              );
+              finalProjectId = project.id;
+              send({ type: "project_created", projectId: finalProjectId });
+            }
           } catch (dbErr) {
             send({
               type: "persist_error",
@@ -155,7 +187,7 @@ export async function POST(req: NextRequest) {
           type: "done",
           finalState,
           reason,
-          projectId,
+          projectId: finalProjectId,
           result: result
             ? {
                 files: result.files,

@@ -106,7 +106,7 @@ export function useWorkspace() {
   );
 
   const runVersion = useCallback(
-    async (request: string, freshProject: boolean) => {
+    async (request: string, freshProject: boolean, currentHtml?: string) => {
       const id = ++versionId.current;
       activeVersionId.current = id;
       approvalSessionId.current = null;
@@ -337,10 +337,15 @@ export function useWorkspace() {
       };
 
       try {
+        const payload: Record<string, unknown> = { input: request };
+        if (currentHtml) {
+          payload.currentFiles = [{ path: "index.html", content: currentHtml }];
+        }
+
         const response = await fetch("/api/pipeline", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ input: request }),
+          body: JSON.stringify(payload),
         });
 
         if (!response.ok) {
@@ -399,13 +404,18 @@ export function useWorkspace() {
     [running, runVersion],
   );
 
-  /** 工作区内追加输入 → 调 API 生成新版本 */
+  /** 工作区内追加输入 → 基于当前代码生成新版本 */
   const sendFollowUp = useCallback(
     (request: string) => {
       if (running || !project) return;
-      void runVersion(request, false);
+      // 获取当前选中版本的 HTML，传给 LLM 做增量修改
+      const currentVersion = project.versions.find(
+        (v) => v.id === selectedVersionId,
+      );
+      const currentHtml = currentVersion?.html ?? undefined;
+      void runVersion(request, false, currentHtml);
     },
-    [running, project, runVersion],
+    [running, project, selectedVersionId, runVersion],
   );
 
   /** 从 Sidebar 打开真实项目：调 API 获取项目详情 */

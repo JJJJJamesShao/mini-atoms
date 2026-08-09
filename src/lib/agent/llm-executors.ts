@@ -5,6 +5,7 @@ import { chat, streamChat, streamGLM } from "@/lib/llm/client";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
+  buildFollowUpPrompt,
   buildGameGeneratePrompt,
   buildGeneratePrompt,
   buildPatchPrompt,
@@ -254,6 +255,72 @@ export function createLLMExecutors(
       }
 
       try {
+        // === FOLLOW-UP 模式：有当前代码 + 无错误 → 基于现有代码做增量修改 ===
+        if (!isFixMode && hasCurrentCode) {
+          const currentHtml = currentFiles[0].content;
+          bus?.emit({
+            type: "agent:progress",
+            agent: "generate",
+            role: "前端工程师",
+            percent: 10,
+            message: `对话迭代：基于现有代码 ${currentHtml.length} 字符做增量修改...`,
+          });
+
+          const messages = buildFollowUpPrompt(
+            currentHtml,
+            spec.requirements.join("，"),
+          );
+          const response = await chat(MODEL_ROUTING.generate, messages);
+          const patchText = response.choices[0]?.message?.content ?? "";
+
+          bus?.emit({
+            type: "agent:thinking",
+            agent: "generate",
+            role: "前端工程师",
+            message: `收到修改指令，正在解析并应用...`,
+          });
+
+          const blocks = parsePatch(patchText);
+          const patchResult = applyPatch(currentHtml, blocks);
+
+          if (patchResult.success && patchResult.newContent !== currentHtml) {
+            const newHtml = patchResult.newContent;
+            const result: GenerateOutput = {
+              files: [{ path: "index.html", content: newHtml }],
+              notes: `对话迭代：基于现有代码应用 ${patchResult.applied} 处修改，代码从 ${currentHtml.length} → ${newHtml.length} 字符`,
+            };
+
+            memory.generate.add({
+              topic: MessageTopic.CODE,
+              content: JSON.stringify(result),
+              metadata: { direction: "out" },
+            });
+            bus?.emit({
+              type: "file:generated",
+              agent: "generate",
+              role: "前端工程师",
+              message: `${result.files[0].path}（增量编辑，${newHtml.length} 字符）`,
+              output: { path: result.files[0].path, size: newHtml.length },
+            });
+            emit({
+              type: "agent:complete",
+              agent: "generate",
+              role: "前端工程师",
+              output: result,
+              message: `增量修改完成：${patchResult.applied} 处修改已应用`,
+            });
+            return result;
+          }
+
+          // Follow-up Patch 失败 → 回退到完整重写
+          bus?.emit({
+            type: "agent:thinking",
+            agent: "generate",
+            role: "前端工程师",
+            message: `增量修改未成功，回退到完整重写...`,
+          });
+        }
+
         // === PATCH 模式：校验失败 + 有当前代码 → 精确编辑，避免完整重写 ===
         if (isFixMode && hasCurrentCode) {
           const currentHtml = currentFiles[0].content;

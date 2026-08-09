@@ -23,7 +23,7 @@ async function main() {
   });
 
   if (error) {
-    if (error.message.includes("already been registered")) {
+    if (error.message.includes("User already registered")) {
       console.log("账号已存在，跳过创建");
       return;
     }

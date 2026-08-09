@@ -24,6 +24,15 @@ ANTHROPIC_AUTH_TOKEN=
 ANTHROPIC_BASE_URL=
 ```
 
+### 数据库初始化（fresh Supabase 必做）
+
+在 Supabase Dashboard → SQL Editor 按顺序执行：
+
+```bash
+supabase/migrations/000_core_tables.sql  # projects / versions / messages
+supabase/migrations/001_rbac.sql         # profiles（角色）/ usage（限流）
+```
+
 ### 本地运行
 
 ```bash

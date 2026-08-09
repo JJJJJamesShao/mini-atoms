@@ -43,8 +43,18 @@ async function collectStreamWithProgress(
   const emittedSections = new Set<string>();
 
   for await (const chunk of stream) {
+    // 调试：打印第一个 chunk 的完整结构
+    if (content.length === 0) {
+      console.log("[DEBUG] First chunk:", JSON.stringify(chunk, null, 2));
+    }
+
     const delta = chunk.choices[0]?.delta?.content ?? "";
-    content += delta;
+    if (delta) {
+      content += delta;
+    } else if (content.length === 0) {
+      // 记录空 delta 的情况
+      console.log("[DEBUG] Empty delta, chunk:", JSON.stringify(chunk));
+    }
 
     // 每 200 字符 emit 进度
     if (content.length - lastEmitLength >= EMIT_INTERVAL) {
@@ -74,6 +84,7 @@ async function collectStreamWithProgress(
   }
 
   const estimatedTokens = Math.round(content.length * 0.75);
+  console.log("[DEBUG] Stream complete:", { totalChars: content.length, firstChars: content.slice(0, 100) });
   return { content, charCount: content.length, estimatedTokens };
 }
 

@@ -144,7 +144,7 @@ export function usePipeline() {
           const out = await base.verify(files);
           setStage(
             "verify",
-            "done",
+            out.pass ? "done" : "failed",
             out.pass
               ? "语法与结构校验通过"
               : out.errors.map((e) => `${e.rule}: ${e.message}`).join("；"),

@@ -18,6 +18,7 @@ export default function Home() {
     executionLogs,
     startProject,
     sendFollowUp,
+    openProject,
     openScenario,
     selectVersion,
     approve,
@@ -30,8 +31,12 @@ export default function Home() {
     return ok;
   };
 
-  const handleOpenProject = (scenarioId: string) => {
-    openScenario(scenarioId);
+  const handleOpenProject = (projectId: string, isReal: boolean) => {
+    if (isReal) {
+      void openProject(projectId);
+    } else {
+      openScenario(projectId);
+    }
     setView("workspace");
     setSidebarOpen(false);
   };

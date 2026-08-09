@@ -15,7 +15,7 @@ describe("verifyHtml", () => {
     }
   });
 
-  it("JS 语法错误：失败并报行号", () => {
+  it("JS 语法错误：失败并报全局行号", () => {
     const html = `<!DOCTYPE html>
 <html><body>
 <script>
@@ -27,7 +27,11 @@ var b = ;
     expect(r.pass).toBe(false);
     expect(r.stage).toBe("syntax");
     expect(r.errors[0].rule).toBe("syntax");
-    expect(r.errors[0].message).toMatch(/行 3:/);
+    // 全局行号：<!DOCTYPE html>(1) + <html><body>(2) + <script>(3) + var a(4) + var b(5)
+    expect(r.errors[0].message).toMatch(/第 5 行/);
+    expect(r.errors[0].line).toBe(5);
+    expect(r.errors[0].snippet).toBeDefined();
+    expect(r.errors[0].suggestion).toBeDefined();
   });
 
   it("缺 DOCTYPE：structure 阶段失败", () => {
@@ -88,6 +92,72 @@ var b = ;
     const r = verifyHtml(html);
     expect(r.pass).toBe(false);
     expect(r.stage).toBe("syntax");
+  });
+
+  it("含 <iframe>：security 阶段失败", () => {
+    const html = `<!DOCTYPE html>
+<html><body><iframe src="https://evil.com"></iframe></body></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("security");
+    expect(r.errors.some((e) => e.rule === "dangerous-tag")).toBe(true);
+  });
+
+  it("含 javascript: 协议链接：security 阶段失败", () => {
+    const html = `<!DOCTYPE html>
+<html><body><a href="javascript:alert(1)">点击</a></body></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("security");
+    expect(r.errors.some((e) => e.rule === "xss-vector")).toBe(true);
+  });
+
+  it("含 onclick 内联处理器：security 阶段失败", () => {
+    const html = `<!DOCTYPE html>
+<html><body><button onclick="alert(1)">点击</button></body></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("security");
+    expect(r.errors.some((e) => e.rule === "xss-vector")).toBe(true);
+  });
+
+  it("含 <form action>：security 阶段失败", () => {
+    const html = `<!DOCTYPE html>
+<html><body><form action="https://evil.com/submit"><input></form></body></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("security");
+    expect(r.errors.some((e) => e.rule === "external-communication")).toBe(
+      true,
+    );
+  });
+
+  it("缺 <body>：structure 阶段警告", () => {
+    const html = `<!DOCTYPE html>
+<html><script>var x=1;</script></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.errors.some((e) => e.rule === "body-tag")).toBe(true);
+  });
+
+  it("语法错误优先于安全错误（先 syntax 后 security）", () => {
+    const html = `<!DOCTYPE html>
+<html><body>
+<script>var x = ;</script>
+<iframe src="evil.com"></iframe>
+</body></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("syntax");
+  });
+
+  it("安全错误优先于结构错误（先 security 后 structure）", () => {
+    const html = `<html><body>
+<a href="javascript:alert(1)">click</a>
+</body></html>`;
+    const r = verifyHtml(html);
+    expect(r.pass).toBe(false);
+    expect(r.stage).toBe("security");
   });
 });
 

@@ -29,10 +29,18 @@ export interface PipelineEvent {
 export interface Executors {
   clarify: (input: string) => Promise<ClarifyOutput>;
   spec: (clarify: ClarifyOutput) => Promise<SpecOutput>;
-  /** errors 非空表示 fix 后的重新生成，执行器可据此修正输出 */
+  /**
+   * 生成代码。
+   * @param spec - 规格
+   * @param errors - 校验错误（非空表示 fix 模式）
+   * @param currentFiles - 当前代码文件（fix 模式时传入，用于 patch 编辑）
+   * @param attempt - 当前 fix 轮次（0 表示首次生成，1+ 表示修复重试）
+   */
   generate: (
     spec: SpecOutput,
     errors?: VerifyResult["errors"],
+    currentFiles?: File[],
+    attempt?: number,
   ) => Promise<GenerateOutput>;
   verify: (files: File[]) => Promise<VerifyResult>;
 }

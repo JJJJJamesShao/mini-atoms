@@ -18,7 +18,7 @@ function StatusIcon({ status }: { status: StageItem["status"] }) {
     return <span className="text-red-600 dark:text-red-400">✗</span>;
   if (status === "active")
     return (
-      <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+      <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-blue-300 border-t-blue-600 dark:border-blue-700 dark:border-t-blue-400" />
     );
   return (
     <span className="inline-block h-2 w-2 rounded-full border border-neutral-300 dark:border-neutral-600" />
@@ -32,8 +32,12 @@ export default function PipelineTimeline({ stages }: { stages: StageItem[] }) {
       {stages.map(({ stage, status, detail }) => (
         <li
           key={stage}
-          className={`flex items-baseline gap-2 text-sm transition-opacity duration-300 ${
-            status === "pending" ? "opacity-40" : "opacity-100"
+          className={`flex items-baseline gap-2 text-sm transition-all duration-300 ${
+            status === "pending"
+              ? "opacity-40"
+              : status === "active"
+                ? "opacity-100 rounded-lg bg-blue-50 px-2 py-1 -mx-2 dark:bg-blue-950/30"
+                : "opacity-100"
           }`}
         >
           <span className="relative top-[-1px] shrink-0">

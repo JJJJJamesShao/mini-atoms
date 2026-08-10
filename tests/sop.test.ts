@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { runSOP } from "../src/lib/agent/engine";
 import { selectSOP, selectSOPId } from "../src/lib/agent/router";
 import { ROLES } from "../src/lib/agent/role";
-import { DEFAULT_SOP, GAME_SOP, SOP_REGISTRY } from "../src/lib/agent/sop";
+import {
+  DEFAULT_SOP,
+  FULLSTACK_SOP,
+  GAME_SOP,
+  SOP_REGISTRY,
+} from "../src/lib/agent/sop";
 import type { Executors } from "../src/lib/agent";
 import type {
   ClarifyOutput,
@@ -84,9 +89,14 @@ describe("selectSOP 路由", () => {
     expect(selectSOPId("做一个计算器")).toBe("tool");
   });
 
+  it("复杂任务 → fullstack-app 多阶段流程", () => {
+    expect(selectSOPId("做一个博客")).toBe("fullstack-app");
+    expect(selectSOPId("带登录的管理系统")).toBe("fullstack-app");
+    expect(selectSOPId("做一个 CRUD 后台")).toBe("fullstack-app");
+  });
+
   it("其他输入 → web-app 默认流程", () => {
     expect(selectSOPId("做一个电商网站")).toBe("web-app");
-    expect(selectSOPId("做一个博客")).toBe("web-app");
   });
 
   it("tool 复用 web-app 完整流程；game 为精简流程（无 approve）", () => {
@@ -99,7 +109,7 @@ describe("selectSOP 路由", () => {
 
 describe("SOP 配置完整性", () => {
   it("所有步骤的跳转目标都存在，角色引用合法", () => {
-    for (const sop of [DEFAULT_SOP, GAME_SOP]) {
+    for (const sop of [DEFAULT_SOP, GAME_SOP, FULLSTACK_SOP]) {
       const names = new Set(sop.steps.map((s) => s.name));
       for (const step of sop.steps) {
         const targets =
@@ -206,5 +216,93 @@ describe("runSOP 执行引擎", () => {
     expect(out.reason).toBe("verify_failed");
     // 1 次首次生成 + 4 次修复重试（MAX_FIX_ATTEMPTS=5，第 5 次 fix 判定用尽）
     expect(calls.filter((c) => c === "generate")).toHaveLength(5);
+  });
+
+  it("fullstack-app：四阶段产物传递 + 确定性 merge → done", async () => {
+    const calls: string[] = [];
+    const stageInputs: Record<string, string[] | undefined> = {};
+    const executors: Executors = {
+      clarify: async () => READY_CLARIFY,
+      spec: async () => SPEC,
+      generate: async (_spec, _errors, currentFiles, _attempt, stage) => {
+        calls.push(`generate:${stage ?? "plain"}`);
+        stageInputs[stage ?? "plain"] = currentFiles?.map((f) => f.path);
+        const content =
+          stage === "schema"
+            ? "const db = {};"
+            : stage === "shell"
+              ? "<!DOCTYPE html><html><head></head><body><!-- PAGE_CONTENT:home --></body></html>"
+              : "// === PAGE: home ===\n<div>首页</div>";
+        return { files: [{ path: `${stage}.out`, content }], notes: "ok" };
+      },
+      verify: async () => VERIFY_OK,
+    };
+    const out = await runSOP(
+      "做一个带登录的博客",
+      FULLSTACK_SOP,
+      executors,
+      async () => true,
+    );
+
+    expect(out.finalState).toBe("done");
+    expect(calls).toEqual([
+      "generate:schema",
+      "generate:shell",
+      "generate:pages",
+    ]);
+    // 阶段产物传递：shell 引用 schema，pages 引用 schema+shell
+    expect(stageInputs["shell"]).toEqual(["schema.out"]);
+    expect(stageInputs["pages"]).toEqual(["schema.out", "shell.out"]);
+    // 确定性 merge：占位符被页面代码替换，schema 被注入
+    const html = out.result?.files[0].content ?? "";
+    expect(html).toContain("<div>首页</div>");
+    expect(html).toContain("const db = {};");
+    expect(html).not.toContain("PAGE_CONTENT");
+    // 中间产物随结果带出（落库供排查）
+    expect(out.stageOutputs?.schema).toBeDefined();
+    expect(out.stageOutputs?.shell).toBeDefined();
+    expect(out.stageOutputs?.pages).toBeDefined();
+  });
+
+  it("fullstack-app：阶段校验失败只重修该阶段（lastErrors 不跨阶段污染）", async () => {
+    const verifyQueue = [
+      VERIFY_FAIL, // verify-schema 第一次失败
+      VERIFY_OK, // verify-schema 重修后通过
+      VERIFY_OK, // verify-shell
+      VERIFY_OK, // verify-pages
+      VERIFY_OK, // 最终 verify
+    ];
+    const genCalls: { stage?: string; hasErrors: boolean }[] = [];
+    const executors: Executors = {
+      clarify: async () => READY_CLARIFY,
+      spec: async () => SPEC,
+      generate: async (_spec, errors, _files, _attempt, stage) => {
+        genCalls.push({ stage, hasErrors: Boolean(errors?.length) });
+        const content =
+          stage === "schema"
+            ? "const db = {};"
+            : stage === "shell"
+              ? "<!DOCTYPE html><html><head></head><body><!-- PAGE_CONTENT:home --></body></html>"
+              : "// === PAGE: home ===\n<div>首页</div>";
+        return { files: [{ path: `${stage}.out`, content }], notes: "ok" };
+      },
+      verify: async () =>
+        verifyQueue.length > 1 ? verifyQueue.shift()! : verifyQueue[0],
+    };
+    const out = await runSOP(
+      "做一个带登录的博客",
+      FULLSTACK_SOP,
+      executors,
+      async () => true,
+    );
+
+    expect(out.finalState).toBe("done");
+    // schema 生成两次（第二次带错误信息重修），shell/pages 各一次且无错误污染
+    expect(genCalls).toEqual([
+      { stage: "schema", hasErrors: false },
+      { stage: "schema", hasErrors: true },
+      { stage: "shell", hasErrors: false },
+      { stage: "pages", hasErrors: false },
+    ]);
   });
 });

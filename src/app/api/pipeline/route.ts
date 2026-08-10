@@ -246,6 +246,8 @@ export async function POST(req: NextRequest) {
         questions: string[] | null;
         files: File[];
         assistantText: string;
+        /** 多阶段 SOP 中间产物（schema/shell/pages 原始代码） */
+        stageOutputs?: Record<string, unknown> | null;
       }): Promise<string | null> => {
         persistAttempted = true;
         const notify = (data: unknown) => {
@@ -264,6 +266,7 @@ export async function POST(req: NextRequest) {
           logs: processLogs,
           parentVersionNo: null, // 下方按项目实际情况填充
           questions: opts.questions,
+          stageOutputs: opts.stageOutputs ?? null,
         };
         if (projectId) {
           // 对话迭代：追加版本到现有项目
@@ -325,19 +328,11 @@ export async function POST(req: NextRequest) {
           });
         };
 
-        // 前端按 sop.steps 动态生成阶段卡片（fix 为内部步骤，不下发）
+        // 前端按 sop.steps 动态生成阶段卡片（fix/ fail 为内部步骤，不下发；
+        // 多阶段 SOP 的 generate-X/verify-X/merge 原样下发）
         displaySteps = sop.steps
           .map((s) => s.name)
-          .filter((n) =>
-            [
-              "clarify",
-              "spec",
-              "approve",
-              "generate",
-              "verify",
-              "done",
-            ].includes(n),
-          );
+          .filter((n) => !n.startsWith("fix") && n !== "fail");
         send({
           type: "start",
           input,
@@ -347,15 +342,16 @@ export async function POST(req: NextRequest) {
         // 对话迭代：传入当前代码，让 LLM 基于现有代码修改
         const initialFiles: File[] | undefined = currentFiles;
 
-        const { finalState, reason, result, questions } = await runSOP(
-          input,
-          sop,
-          executors,
-          approver,
-          bus,
-          roles,
-          initialFiles,
-        );
+        const { finalState, reason, result, questions, stageOutputs } =
+          await runSOP(
+            input,
+            sop,
+            executors,
+            approver,
+            bus,
+            roles,
+            initialFiles,
+          );
 
         // 流水线结束后持久化：成功与失败运行都落库（失败过程对客户同样有信任价值）
         let finalProjectId: string | null = null;
@@ -393,6 +389,7 @@ export async function POST(req: NextRequest) {
               files,
               assistantText:
                 notes ?? (finalState === "done" ? "生成完成" : "生成失败"),
+              stageOutputs: stageOutputs ?? null,
             });
           } catch (dbErr) {
             send({

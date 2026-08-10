@@ -80,6 +80,7 @@ describe.skipIf(!hasEnv)("数据库操作（真实 Supabase）", () => {
         ],
         parentVersionNo: null,
         questions: null,
+        stageOutputs: null,
       },
     );
     // 分叉版本：基于 v1 修改（need_input 软着陆：带澄清问题清单）
@@ -101,6 +102,7 @@ describe.skipIf(!hasEnv)("数据库操作（真实 Supabase）", () => {
         ],
         parentVersionNo: 1,
         questions: ["页面主题是什么？", "需要哪些功能模块？"],
+        stageOutputs: null,
       },
     );
 

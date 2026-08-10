@@ -37,6 +37,10 @@ export interface Version {
   /** 结果说明（成功产物 notes / 失败原因） */
   note: string | null;
   html: string | null;
+  quality?: {
+    score: number;
+    checks: Array<{ name: string; passed: boolean }>;
+  };
 }
 
 export interface ExecutionLog {
@@ -88,6 +92,8 @@ export function useWorkspace() {
   const activeVersionId = useRef<number | null>(null);
   /** 当前挂起审批的会话 id（服务端确认门凭证） */
   const approvalSessionId = useRef<string | null>(null);
+  /** 当前工作区对应的持久化项目 id（对话迭代时传给后端追加版本；新项目/罐头演示为 null） */
+  const lastPersistedProjectId = useRef<string | null>(null);
   /** 当前运行版本的阶段列表（由服务端 SOP 动态下发，默认完整流程） */
   const activeStages = useRef<readonly string[]>(STAGE_ORDER);
 
@@ -111,6 +117,8 @@ export function useWorkspace() {
       activeVersionId.current = id;
       approvalSessionId.current = null;
       activeStages.current = STAGE_ORDER;
+      // 新项目必须先清空已持久化的项目 id，否则会被错误追加到上一个项目
+      if (freshProject) lastPersistedProjectId.current = null;
 
       const title = request.length > 30 ? `${request.slice(0, 30)}…` : request;
       const version: Version = {
@@ -301,12 +309,21 @@ export function useWorkspace() {
           }));
           setStage("approve", "active");
           setAwaitingApproval(true);
+        } else if (type === "project_created" || type === "project_updated") {
+          // 持久化闭环：记录项目 id，后续对话迭代追加版本而非新建项目
+          if (typeof event.projectId === "string") {
+            lastPersistedProjectId.current = event.projectId;
+          }
         } else if (type === "done") {
           const result = event.result as {
             files: { path: string; content: string }[];
             notes: string;
           } | null;
           if (event.finalState === "done" && result) {
+            // 兜底：done 事件也携带 projectId（persist 失败时为 null，不覆盖）
+            if (typeof event.projectId === "string") {
+              lastPersistedProjectId.current = event.projectId;
+            }
             // 强制同步所有未完成的 stages，防止状态不一致
             finalizeStages("done", result.notes);
             setStage("done", "done", result.notes);
@@ -340,6 +357,10 @@ export function useWorkspace() {
         const payload: Record<string, unknown> = { input: request };
         if (currentHtml) {
           payload.currentFiles = [{ path: "index.html", content: currentHtml }];
+        }
+        // 如果有持久化的项目 ID，传递 projectId 让后端追加版本
+        if (lastPersistedProjectId.current) {
+          payload.projectId = lastPersistedProjectId.current;
         }
 
         const response = await fetch("/api/pipeline", {
@@ -443,6 +464,8 @@ export function useWorkspace() {
         };
         setProject({ title: data.project.title, versions: [version] });
         setSelectedVersionId(id);
+        // 打开已有项目后，后续对话迭代应追加到该项目
+        lastPersistedProjectId.current = projectId;
       } catch (err) {
         console.error("[openProject]", err);
       }
@@ -472,6 +495,8 @@ export function useWorkspace() {
       };
       setProject({ title: scenario.title, versions: [version] });
       setSelectedVersionId(id);
+      // 罐头演示未持久化：清空项目 id，后续 follow-up 会创建新项目再迭代
+      lastPersistedProjectId.current = null;
     },
     [running],
   );

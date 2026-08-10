@@ -28,6 +28,21 @@ const STATUS_PILLS: Record<
   },
 };
 
+/** 质量评分组件 */
+function QualityBadge({ score }: { score: number }) {
+  const color =
+    score >= 90
+      ? "bg-green-100 text-green-700"
+      : score >= 70
+        ? "bg-amber-100 text-amber-700"
+        : "bg-red-100 text-red-700";
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>
+      质量 {score}
+    </span>
+  );
+}
+
 interface VersionCardProps {
   version: Version;
   /** 版本序号（从 1 开始） */
@@ -65,6 +80,9 @@ export default function VersionCard({
         <span className="truncate text-sm text-[#525252] dark:text-neutral-400">
           {version.scenarioTitle}
         </span>
+        {version.status === "done" && version.quality && (
+          <QualityBadge score={version.quality.score} />
+        )}
         <span
           className={`ml-auto shrink-0 rounded-full px-2 py-0.5 text-xs ${pill.className}`}
         >

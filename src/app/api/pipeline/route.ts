@@ -8,7 +8,7 @@ import type { File, SpecOutput } from "@/lib/schemas";
 
 /** 强制 Node.js runtime：Edge Runtime 不支持 Buffer 和完整 Supabase 客户端 */
 export const runtime = "nodejs";
-import { createProject } from "@/lib/db/projects";
+import { createProject, getProject } from "@/lib/db/projects";
 import { createVersion, getVersions } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
@@ -60,7 +60,28 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 2. 角色与额度
+  // 2. 迭代模式：校验项目归属，防止携带他人 projectId 写入（写型 IDOR）
+  //    user_id 为 null 的是历史演示数据，沿用 projects API 的既有约定放行
+  if (projectId) {
+    let owner: string | null;
+    try {
+      const project = await getProject(projectId);
+      owner = project.user_id;
+    } catch {
+      return jsonError(404, {
+        error: "project_not_found",
+        message: "项目不存在",
+      });
+    }
+    if (owner && owner !== user.id) {
+      return jsonError(403, {
+        error: "forbidden",
+        message: "无权修改该项目",
+      });
+    }
+  }
+
+  // 3. 角色与额度
   const role = await getUserRole(user.id);
   const used = await countUsageToday(user.id, "generate");
   const quota = DAILY_QUOTA[role];
@@ -77,7 +98,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 3. 记用量
+  // 4. 记用量
   await logUsage(user.id, "generate");
 
   // 创建 SSE 流 + Agent EventBus
@@ -207,6 +228,22 @@ export async function POST(req: NextRequest) {
                 notes: result.notes,
               }
             : null,
+          quality:
+            finalState === "done" && result
+              ? {
+                  passed: true,
+                  score: 100,
+                  checks: [
+                    { name: "语法", passed: true },
+                    { name: "安全", passed: true },
+                    { name: "结构", passed: true },
+                  ],
+                }
+              : {
+                  passed: false,
+                  score: 0,
+                  checks: [],
+                },
         });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);

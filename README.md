@@ -2,7 +2,15 @@
 
 > 一个 **AI Agent 驱动** 的应用生成系统。用户用自然语言描述需求，多角色 Agent 流水线自动完成需求澄清 → 架构规格 → 代码生成 → 语法校验 → 沙箱预览，支持**对话式迭代**与**版本管理**。
 
-**在线体验**: [https://mini-atoms.vercel.app](https://mini-atoms.vercel.app) 
+**在线体验**: [https://mini-atoms.vercel.app](https://mini-atoms.vercel.app)
+
+## Demo
+
+![数独生成 + 迭代修改](docs/demo.gif)
+
+_输入 "做一个数独游戏" → Agent 流水线自动生成 → 输入 "把背景改成深蓝色" → 基于现有代码增量修改_
+
+📹 [完整录屏演示 (demo.mov)](docs/demo.mov)
 
 ---
 

@@ -51,12 +51,14 @@ export function mergeFullstack(
   for (const name of findPagePlaceholders(shellHtml)) {
     const placeholder = new RegExp(`<!--\\s*PAGE_CONTENT:\\s*${name}\\s*-->`);
     const pageCode = pages.get(name) ?? `<!-- 页面 ${name} 的实现缺失 -->`;
-    merged = merged.replace(placeholder, pageCode);
+    // 函数式替换：避免替换串中的 $& / $$ / $' 等模式被 String.replace 解释
+    //（LLM 产物含 `$${price}` 这类文本时会被静默改写）
+    merged = merged.replace(placeholder, () => pageCode);
   }
 
   const schemaScript = `<script>\n${escapeInlineJs(schemaJs)}\n</script>`;
   if (merged.includes("</head>")) {
-    merged = merged.replace("</head>", `${schemaScript}\n</head>`);
+    merged = merged.replace("</head>", () => `${schemaScript}\n</head>`);
   } else {
     // shell 无 </head>（异常产物）：把 schema 放最前，由最终 verify 判结构
     merged = `${schemaScript}\n${merged}`;

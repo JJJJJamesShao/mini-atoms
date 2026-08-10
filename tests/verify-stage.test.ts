@@ -68,4 +68,30 @@ describe("verifyStageCode", () => {
       verifyStageCode("<html><body>越权输出</body></html>", "pages").pass,
     ).toBe(false);
   });
+
+  it("pages：HTML 片段（含内联 script）是合法产物（契约对齐回归）", () => {
+    const fragment = `// === PAGE: home ===
+<div class="home"><h1>首页</h1></div>
+<script>
+  document.getElementById('btn').addEventListener('click', () => {});
+</script>`;
+    expect(verifyStageCode(fragment, "pages").pass).toBe(true);
+  });
+
+  it("pages：内联 script 的 JS 语法错误被逐块检出", () => {
+    const fragment = `// === PAGE: home ===
+<div>ok</div>
+<script>
+var b = ;
+</script>`;
+    const r = verifyStageCode(fragment, "pages");
+    expect(r.pass).toBe(false);
+    expect(r.errors[0].message).toContain("home");
+  });
+
+  it("pages：缺少 PAGE 分隔符块被拒绝", () => {
+    const r = verifyStageCode("<div>没有分隔符的片段</div>", "pages");
+    expect(r.pass).toBe(false);
+    expect(r.errors.some((e) => e.message.includes("PAGE"))).toBe(true);
+  });
 });

@@ -79,4 +79,14 @@ describe("mergeFullstack", () => {
       merged.indexOf("<html>"),
     );
   });
+
+  it("替换串中的 $ 模式不被解释（$& / $$ / $' / 美元模板）", () => {
+    const pages = `// === PAGE: home ===
+<div>价格: $& 和 $$ 以及 $' 还有 \`$\${price}\`</div>
+
+// === PAGE: login ===
+<form>登录</form>`;
+    const merged = mergeFullstack("const db = {};", SHELL, pages);
+    expect(merged).toContain("价格: $& 和 $$ 以及 $' 还有 `$${price}`");
+  });
 });

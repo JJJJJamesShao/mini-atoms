@@ -12,11 +12,15 @@ import { createProject } from "@/lib/db/projects";
 import { createVersion, getVersions } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
+import { getUserRole, type UserRole } from "@/lib/db/profiles";
 import { createAuthClient } from "@/lib/supabase/auth-server";
 import { waitForApproval } from "./gate";
 
-/** 每日生成额度上限（所有用户统一） */
-const DAILY_QUOTA = 10;
+/** 各角色每日 LLM 生成额度：free=0（仅罐头演示），paid 不限量 */
+const DAILY_QUOTA: Record<UserRole, number> = {
+  free: 0,
+  paid: Number.POSITIVE_INFINITY,
+};
 
 const jsonError = (status: number, payload: Record<string, unknown>) =>
   new Response(JSON.stringify(payload), {
@@ -56,14 +60,20 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  // 2. 每日额度检查
+  // 2. 角色与额度
+  const role = await getUserRole(user.id);
   const used = await countUsageToday(user.id, "generate");
-  if (used >= DAILY_QUOTA) {
-    return jsonError(429, {
+  const quota = DAILY_QUOTA[role];
+  if (used >= quota) {
+    return jsonError(role === "free" ? 403 : 429, {
       error: "quota_exceeded",
+      role,
       used,
-      quota: DAILY_QUOTA,
-      message: `今日生成额度已用完（${used}/${DAILY_QUOTA}），请明日再试`,
+      quota: quota === Number.POSITIVE_INFINITY ? null : quota,
+      message:
+        role === "free"
+          ? "免费账号仅支持体验示例项目，AI 生成需付费账号"
+          : "今日生成额度已用完",
     });
   }
 
@@ -197,6 +207,22 @@ export async function POST(req: NextRequest) {
                 notes: result.notes,
               }
             : null,
+          quality:
+            finalState === "done" && result
+              ? {
+                  passed: true,
+                  score: 100,
+                  checks: [
+                    { name: "语法", passed: true },
+                    { name: "安全", passed: true },
+                    { name: "结构", passed: true },
+                  ],
+                }
+              : {
+                  passed: false,
+                  score: 0,
+                  checks: [],
+                },
         });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);

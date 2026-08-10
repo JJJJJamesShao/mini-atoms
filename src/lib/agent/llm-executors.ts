@@ -2,6 +2,7 @@ import type { Executors } from "../agent";
 import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
 import type OpenAI from "openai";
 import { chat, streamChat, streamGLM } from "@/lib/llm/client";
+import { collectStreamText } from "@/lib/llm/stream";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -89,6 +90,9 @@ async function defaultSummarize(snippet: string): Promise<string> {
 /**
  * 实时收集流式响应，同时 emit 进度事件
  *
+ * 超时保护（collectStreamText）：60s 无 chunk 判定 provider 挂起；
+ * 300s 总时长硬上限——此前非流式调用曾被代理挂起 15 分钟才超时。
+ *
  * @param stream - OpenAI 流式响应
  * @param bus - 事件总线
  * @returns 完整文本 + 统计信息
@@ -97,7 +101,6 @@ async function collectStreamWithProgress(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   bus?: AgentEventBus,
 ): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
-  let content = "";
   let lastEmitLength = 0;
   const EMIT_INTERVAL = 200; // 每 200 字符 emit 一次
 
@@ -127,53 +130,49 @@ async function collectStreamWithProgress(
   const emittedSections = new Set<string>();
   const summarizer = new CodeSummarizer();
 
-  for await (const chunk of stream) {
-    // GLM-5.2：只收集 content（最终输出），忽略 reasoning_content（思考过程）
-    // reasoning_content 不应被用于最终产物，否则会混入思考文字导致解析失败
-    const delta = chunk.choices[0]?.delta?.content ?? "";
-
-    if (delta) {
-      content += delta;
-    }
-
-    // 每 200 字符 emit 进度
-    if (content.length - lastEmitLength >= EMIT_INTERVAL) {
-      lastEmitLength = content.length;
-      const estimatedTokens = Math.round(content.length * 0.75); // 中文字符估算
-      bus?.emit({
-        type: "agent:progress",
-        agent: "generate",
-        role: "前端工程师",
-        percent: Math.min(Math.round((content.length / 3000) * 100), 99),
-        message: `已生成 ${content.length} 字符（约 ${estimatedTokens} tokens）...`,
-      });
-    }
-
-    // 检测子步骤标记
-    for (const marker of SECTION_MARKERS) {
-      if (!emittedSections.has(marker.name) && marker.pattern.test(content)) {
-        emittedSections.add(marker.name);
+  const content = await collectStreamText(
+    stream,
+    { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
+    (acc) => {
+      // 每 200 字符 emit 进度
+      if (acc.length - lastEmitLength >= EMIT_INTERVAL) {
+        lastEmitLength = acc.length;
+        const estimatedTokens = Math.round(acc.length * 0.75); // 中文字符估算
         bus?.emit({
-          type: "agent:thinking",
+          type: "agent:progress",
           agent: "generate",
           role: "前端工程师",
-          message: `正在生成 ${marker.name}：${marker.desc}`,
+          percent: Math.min(Math.round((acc.length / 3000) * 100), 99),
+          message: `已生成 ${acc.length} 字符（约 ${estimatedTokens} tokens）...`,
         });
       }
-    }
 
-    // 异步代码摘要（节流 + 失败静默，不阻塞主流程）
-    if (bus) {
-      void summarizer.maybeSummarize(content, (summary) => {
-        bus.emit({
-          type: "agent:summary",
-          agent: "generate",
-          role: "前端工程师",
-          message: summary,
+      // 检测子步骤标记
+      for (const marker of SECTION_MARKERS) {
+        if (!emittedSections.has(marker.name) && marker.pattern.test(acc)) {
+          emittedSections.add(marker.name);
+          bus?.emit({
+            type: "agent:thinking",
+            agent: "generate",
+            role: "前端工程师",
+            message: `正在生成 ${marker.name}：${marker.desc}`,
+          });
+        }
+      }
+
+      // 异步代码摘要（节流 + 失败静默，不阻塞主流程）
+      if (bus) {
+        void summarizer.maybeSummarize(acc, (summary) => {
+          bus.emit({
+            type: "agent:summary",
+            agent: "generate",
+            role: "前端工程师",
+            message: summary,
+          });
         });
-      });
-    }
-  }
+      }
+    },
+  );
 
   const estimatedTokens = Math.round(content.length * 0.75);
   console.log("[DEBUG] Stream complete:", {
@@ -355,8 +354,24 @@ export function createLLMExecutors(
             currentHtml,
             spec.requirements.join("，"),
           );
-          const response = await chat(MODEL_ROUTING.generate, messages);
-          const patchText = response.choices[0]?.message?.content ?? "";
+          // 流式 + 超时保护：此前非流式 chat() 被代理挂起 15 分钟才超时（线上事故），
+          // 流式让进度可观测（每 2000 字符 emit 一次），60s 无 chunk 即判失败
+          let lastFollowUpEmit = 0;
+          const patchText = await collectStreamText(
+            await streamChat(MODEL_ROUTING.generate, messages),
+            { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
+            (acc) => {
+              if (acc.length - lastFollowUpEmit >= 2000) {
+                lastFollowUpEmit = acc.length;
+                bus?.emit({
+                  type: "agent:progress",
+                  agent: "generate",
+                  role: "前端工程师",
+                  message: `已接收 ${acc.length} 字符修改指令...`,
+                });
+              }
+            },
+          );
 
           bus?.emit({
             type: "agent:thinking",
@@ -421,9 +436,23 @@ export function createLLMExecutors(
           // 使用 patch prompt，传入当前代码和错误详情
           const messages = buildPatchPrompt(currentHtml, errors);
 
-          // Patch 模式不需要很长的输出，用非流式请求（更稳定）
-          const response = await chat(MODEL_ROUTING.generate, messages);
-          const patchText = response.choices[0]?.message?.content ?? "";
+          // 流式 + 超时保护（同 follow-up：非流式长请求会被代理静默挂起）
+          let lastPatchEmit = 0;
+          const patchText = await collectStreamText(
+            await streamChat(MODEL_ROUTING.generate, messages),
+            { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
+            (acc) => {
+              if (acc.length - lastPatchEmit >= 2000) {
+                lastPatchEmit = acc.length;
+                bus?.emit({
+                  type: "agent:progress",
+                  agent: "generate",
+                  role: "前端工程师",
+                  message: `第 ${patchRound} 轮修复：已接收 ${acc.length} 字符 Patch...`,
+                });
+              }
+            },
+          );
 
           bus?.emit({
             type: "agent:thinking",

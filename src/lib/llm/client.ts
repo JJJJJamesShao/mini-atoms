@@ -55,13 +55,18 @@ export async function chat(
   config: ModelConfig,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ) {
-  return getClient(config.model).chat.completions.create({
-    model: config.model,
-    messages,
-    max_tokens: config.maxTokens,
-    temperature: config.temperature,
-    stream: false,
-  });
+  return getClient(config.model).chat.completions.create(
+    {
+      model: config.model,
+      messages,
+      max_tokens: config.maxTokens,
+      temperature: config.temperature,
+      stream: false,
+    },
+    // 显式超时：SDK 默认 10min + 重试 2 次，曾致 follow-up 假死 15 分钟。
+    // clarify/spec/摘要等非流式调用正常为秒级，120s + 1 次重试足够。
+    { timeout: 120_000, maxRetries: 1 },
+  );
 }
 
 /** GLM 专用流式对话（供 generate 节点使用） */

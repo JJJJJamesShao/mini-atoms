@@ -28,6 +28,10 @@ export type VersionStatus = "running" | "awaiting" | "done" | "failed";
 
 export interface Version {
   id: number;
+  /** 数据库 version_no（持久化成功后由服务端事件回填；未持久化为 null） */
+  versionNo: number | null;
+  /** 分叉基准：本版本基于哪个 version_no 修改（首版为 null） */
+  parentVersionNo: number | null;
   /** 触发本版本的用户输入 */
   request: string;
   scenarioTitle: string;
@@ -112,7 +116,12 @@ export function useWorkspace() {
   );
 
   const runVersion = useCallback(
-    async (request: string, freshProject: boolean, currentHtml?: string) => {
+    async (
+      request: string,
+      freshProject: boolean,
+      currentHtml?: string,
+      baseVersionNo?: number,
+    ) => {
       const id = ++versionId.current;
       activeVersionId.current = id;
       approvalSessionId.current = null;
@@ -123,6 +132,8 @@ export function useWorkspace() {
       const title = request.length > 30 ? `${request.slice(0, 30)}…` : request;
       const version: Version = {
         id,
+        versionNo: null,
+        parentVersionNo: baseVersionNo ?? null,
         request,
         scenarioTitle: title,
         status: "running",
@@ -323,6 +334,11 @@ export function useWorkspace() {
           if (typeof event.projectId === "string") {
             lastPersistedProjectId.current = event.projectId;
           }
+          // 回填数据库 version_no（版本卡片"基于 vN"与后续分叉基准依赖它）
+          if (typeof event.versionNo === "number") {
+            const versionNo = event.versionNo;
+            updateVersion(id, (v) => ({ ...v, versionNo }));
+          }
         } else if (type === "done") {
           const result = event.result as {
             files: { path: string; content: string }[];
@@ -366,6 +382,10 @@ export function useWorkspace() {
         const payload: Record<string, unknown> = { input: request };
         if (currentHtml) {
           payload.currentFiles = [{ path: "index.html", content: currentHtml }];
+        }
+        // 分叉基准：告诉后端本次基于哪个版本修改（版本卡片"基于 vN"）
+        if (typeof baseVersionNo === "number") {
+          payload.baseVersionNo = baseVersionNo;
         }
         // 如果有持久化的项目 ID，传递 projectId 让后端追加版本
         if (lastPersistedProjectId.current) {
@@ -434,7 +454,7 @@ export function useWorkspace() {
     [running, runVersion],
   );
 
-  /** 工作区内追加输入 → 基于当前代码生成新版本 */
+  /** 工作区内追加输入 → 基于当前选中版本的代码生成新版本（支持回退旧版本分叉修改） */
   const sendFollowUp = useCallback(
     (request: string) => {
       if (running || !project) return;
@@ -443,12 +463,17 @@ export function useWorkspace() {
         (v) => v.id === selectedVersionId,
       );
       const currentHtml = currentVersion?.html ?? undefined;
-      void runVersion(request, false, currentHtml);
+      void runVersion(
+        request,
+        false,
+        currentHtml,
+        currentVersion?.versionNo ?? undefined,
+      );
     },
     [running, project, selectedVersionId, runVersion],
   );
 
-  /** 从 Sidebar 打开真实项目：调 API 获取项目详情 */
+  /** 从 Sidebar 打开真实项目：调 API 获取项目详情，按落库数据完整重建版本与执行日志 */
   const openProject = useCallback(
     async (projectId: string) => {
       if (running) return;
@@ -457,22 +482,81 @@ export function useWorkspace() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
 
-        const id = ++versionId.current;
-        const version: Version = {
-          id,
-          request: data.project.title,
-          scenarioTitle: data.project.title,
-          status: "done",
-          stages: STAGE_ORDER.map((stage) => ({
-            stage,
-            status: "done" as const,
-          })),
-          spec: null,
-          note: `创建于 ${new Date(data.project.created_at).toLocaleDateString()}`,
-          html: data.latestHtml,
-        };
-        setProject({ title: data.project.title, versions: [version] });
-        setSelectedVersionId(id);
+        interface StoredVersion {
+          version_no: number;
+          files: { path: string; content: string }[] | null;
+          request: string | null;
+          notes: string | null;
+          spec: SpecOutput | null;
+          stages:
+            { stage: string; status: StageStatus; detail?: string }[] | null;
+          logs:
+            | {
+                seq: number;
+                stage: string;
+                phase: "start" | "end" | "progress";
+                detail?: string;
+                timestamp: number;
+              }[]
+            | null;
+          parent_version_no: number | null;
+        }
+
+        const stored: StoredVersion[] = data.versions ?? [];
+        const versions: Version[] = [];
+        const logs: ExecutionLog[] = [];
+
+        for (const v of stored) {
+          const id = ++versionId.current;
+          const html =
+            v.files?.find((f) => f.path === "index.html")?.content ??
+            v.files?.[0]?.content ??
+            null;
+          // 存量行无过程数据：回退为全 done 阶段（仅兼容旧数据，新运行必带 stages）
+          const stages: StageItem[] = v.stages?.length
+            ? v.stages
+                .filter((s): s is StageItem =>
+                  (STAGE_ORDER as readonly string[]).includes(s.stage),
+                )
+                .map((s) => ({ ...s, stage: s.stage as StageName }))
+            : STAGE_ORDER.map((stage) => ({
+                stage,
+                status: "done" as const,
+              }));
+          const failed = stages.some((s) => s.status === "failed");
+          const request = v.request ?? data.project.title;
+          const title =
+            request.length > 30 ? `${request.slice(0, 30)}…` : request;
+
+          versions.push({
+            id,
+            versionNo: v.version_no,
+            parentVersionNo: v.parent_version_no,
+            request,
+            scenarioTitle: title,
+            status: failed ? "failed" : "done",
+            stages,
+            spec: v.spec,
+            note: v.notes,
+            html,
+          });
+
+          for (const l of v.logs ?? []) {
+            logs.push({
+              id: ++logId.current,
+              versionId: id,
+              stage: l.stage as StageName,
+              phase: l.phase,
+              detail: l.detail,
+              timestamp: l.timestamp,
+            });
+          }
+        }
+
+        setProject({ title: data.project.title, versions });
+        setExecutionLogs(logs);
+        // 默认选中最新版本
+        setSelectedVersionId(versions[versions.length - 1]?.id ?? null);
         // 打开已有项目后，后续对话迭代应追加到该项目
         lastPersistedProjectId.current = projectId;
       } catch (err) {
@@ -491,6 +575,8 @@ export function useWorkspace() {
       const id = ++versionId.current;
       const version: Version = {
         id,
+        versionNo: null,
+        parentVersionNo: null,
         request: scenario.input,
         scenarioTitle: scenario.title,
         status: "done",

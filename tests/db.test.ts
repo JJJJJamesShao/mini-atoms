@@ -43,6 +43,81 @@ describe.skipIf(!hasEnv)("数据库操作（真实 Supabase）", () => {
     await getSupabase().from("projects").delete().eq("id", project.id);
   });
 
+  it("版本过程数据七字段写入并可完整读回", async () => {
+    const project = await createProject("过程数据测试");
+    const v1 = await createVersion(
+      project.id,
+      [{ path: "index.html", content: "<h1>v1</h1>" }],
+      1,
+      {
+        request: "做一个计时器",
+        notes: "生成完成",
+        spec: {
+          requirements: ["r1"],
+          constraints: ["c1"],
+          userStories: ["u1"],
+        },
+        sopId: "web-app",
+        stages: [
+          { stage: "clarify", status: "done", detail: "需求已澄清" },
+          { stage: "generate", status: "done" },
+        ],
+        logs: [
+          {
+            seq: 1,
+            stage: "clarify",
+            phase: "start",
+            detail: "产品经理",
+            timestamp: Date.now(),
+          },
+          { seq: 2, stage: "clarify", phase: "end", timestamp: Date.now() },
+        ],
+        parentVersionNo: null,
+      },
+    );
+    // 分叉版本：基于 v1 修改
+    const v2 = await createVersion(
+      project.id,
+      [{ path: "index.html", content: "<h1>v2</h1>" }],
+      2,
+      {
+        request: "改成深色模式",
+        notes: null, // 失败运行：notes 为空但过程仍在
+        spec: null,
+        sopId: "web-app",
+        stages: [
+          { stage: "clarify", status: "done" },
+          { stage: "generate", status: "failed", detail: "校验未通过" },
+        ],
+        logs: [
+          { seq: 1, stage: "generate", phase: "start", timestamp: Date.now() },
+        ],
+        parentVersionNo: 1,
+      },
+    );
+
+    const versions = await getVersions(project.id);
+    expect(versions).toHaveLength(2);
+
+    const r1 = versions.find((v) => v.id === v1.id)!;
+    expect(r1.request).toBe("做一个计时器");
+    expect(r1.notes).toBe("生成完成");
+    expect(r1.spec).toMatchObject({ requirements: ["r1"] });
+    expect(r1.sop_id).toBe("web-app");
+    expect(r1.stages).toHaveLength(2);
+    expect(r1.stages![0]).toMatchObject({ stage: "clarify", status: "done" });
+    expect(r1.logs).toHaveLength(2);
+    expect(r1.logs![0]).toMatchObject({ seq: 1, phase: "start" });
+    expect(r1.parent_version_no).toBeNull();
+
+    const r2 = versions.find((v) => v.id === v2.id)!;
+    expect(r2.parent_version_no).toBe(1);
+    expect(r2.stages![1].status).toBe("failed");
+
+    await getSupabase().from("versions").delete().eq("project_id", project.id);
+    await getSupabase().from("projects").delete().eq("id", project.id);
+  });
+
   it("创建并查询消息", async () => {
     const project = await createProject("消息测试");
     const message = await createMessage(project.id, "user", "做一个计时器");

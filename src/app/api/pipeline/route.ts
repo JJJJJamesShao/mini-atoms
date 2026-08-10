@@ -10,6 +10,7 @@ import type { File, SpecOutput } from "@/lib/schemas";
 export const runtime = "nodejs";
 import { createProject, getProject } from "@/lib/db/projects";
 import { createVersion, getVersions } from "@/lib/db/versions";
+import type { ProcessData, ProcessLog, StageState } from "@/lib/db/versions";
 import { createMessage } from "@/lib/db/messages";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { getUserRole, type UserRole } from "@/lib/db/profiles";
@@ -28,6 +29,18 @@ const jsonError = (status: number, payload: Record<string, unknown>) =>
     headers: { "Content-Type": "application/json" },
   });
 
+/** 失败原因 → 用户可读文案（与前端 useWorkspace.failReasonText 保持一致） */
+function failReasonText(reason: string | null): string {
+  switch (reason) {
+    case "spec_rejected":
+      return "规格被拒绝，请重新描述需求。";
+    case "need_clarification":
+      return "需求信息不足，请补充更多细节后重试。";
+    default:
+      return "生成校验多次未通过，请换个描述重试。";
+  }
+}
+
 /**
  * POST /api/pipeline
  * 服务端 Agent 流水线入口（强制登录 + 每日额度限制）
@@ -42,10 +55,12 @@ export async function POST(req: NextRequest) {
     return jsonError(400, { error: "缺少 input 字段" });
   }
 
-  const { input, projectId, currentFiles } = body as {
+  const { input, projectId, currentFiles, baseVersionNo } = body as {
     input: string;
     projectId?: string;
     currentFiles?: File[];
+    /** 分叉基准：本次基于哪个 version_no 的代码修改（首版缺省） */
+    baseVersionNo?: number;
   };
 
   // 1. 强制登录
@@ -112,9 +127,82 @@ export async function POST(req: NextRequest) {
       // 创建独立的 Agent 事件总线
       const bus = new AgentEventBus();
 
-      // 全局订阅：所有 Agent 事件实时推送到前端
+      // 过程数据收集器：从 bus 事件聚合阶段终态与执行日志，随版本行落库，
+      // 使刷新后可完整回放 workflow（客户在意开发过程的细节执行）
+      const processLogs: ProcessLog[] = [];
+      const stageStates = new Map<string, StageState>();
+      let capturedSpec: SpecOutput | null = null;
+      let logSeq = 0;
+      const pushProcessLog = (
+        stage: string,
+        phase: ProcessLog["phase"],
+        detail?: string,
+      ) => {
+        processLogs.push({
+          seq: ++logSeq,
+          stage,
+          phase,
+          detail,
+          timestamp: Date.now(),
+        });
+      };
+
+      // 全局订阅：所有 Agent 事件实时推送到前端 + 聚合为过程数据
       bus.subscribeAll((event) => {
         send({ type: "agent_event", payload: event });
+
+        const stage = event.agent;
+        switch (event.type) {
+          case "agent:start":
+            stageStates.set(stage, {
+              stage,
+              status: "active",
+              detail: event.role,
+            });
+            pushProcessLog(stage, "start", event.role);
+            break;
+          case "agent:complete": {
+            // verify 未通过时阶段记为 failed（与前端 useWorkspace 的判定一致）
+            const out = event.output as { pass?: boolean } | undefined;
+            const status =
+              stage === "verify" && out?.pass === false ? "failed" : "done";
+            stageStates.set(stage, {
+              stage,
+              status,
+              detail: event.message,
+            });
+            pushProcessLog(stage, "end", event.message);
+            break;
+          }
+          case "agent:thinking":
+          case "agent:progress":
+          case "agent:summary":
+            pushProcessLog(
+              stage,
+              "progress",
+              event.message ??
+                (event.percent ? `进度 ${event.percent}%` : undefined),
+            );
+            break;
+          case "agent:error":
+            stageStates.set(stage, {
+              stage,
+              status: "failed",
+              detail: event.error ?? event.message,
+            });
+            pushProcessLog(stage, "progress", event.error ?? event.message);
+            break;
+          case "file:generated": {
+            const f = event.output as
+              { path?: string; size?: number } | undefined;
+            pushProcessLog(
+              stage,
+              "progress",
+              `📄 ${f?.path ?? "文件"}（${f?.size ?? 0} 字符）`,
+            );
+            break;
+          }
+        }
       });
 
       try {
@@ -138,6 +226,7 @@ export async function POST(req: NextRequest) {
         //（仅含 approve 步骤的 SOP 会调用；game SOP 自动跳过）
         const sessionId = crypto.randomUUID();
         const approver = async (spec: SpecOutput) => {
+          capturedSpec = spec; // 落库用：记录用户确认的规格
           send({ type: "approve_needed", sessionId, spec });
           return waitForApproval(sessionId, user.id);
         };
@@ -174,21 +263,51 @@ export async function POST(req: NextRequest) {
           initialFiles,
         );
 
-        // 流水线成功后持久化
+        // 流水线结束后持久化：成功与失败运行都落库（失败过程对客户同样有信任价值）
         let finalProjectId: string | null = null;
-        if (finalState === "done" && result) {
+        if (finalState === "done" || finalState === "fail") {
           try {
+            // 阶段卡片终态：未触达/未收尾的阶段跟随流水线终态（与前端 finalizeStages 一致）
+            const finalStageStatus =
+              finalState === "done" ? ("done" as const) : ("failed" as const);
+            const stages: StageState[] = displaySteps.map((name) => {
+              const s = stageStates.get(name);
+              if (!s || s.status === "active" || s.status === "pending") {
+                return {
+                  stage: name,
+                  status: finalStageStatus,
+                  detail: s?.detail,
+                };
+              }
+              return s;
+            });
+            const notes =
+              result?.notes ?? (reason ? failReasonText(reason) : null);
+            const process: ProcessData = {
+              request: input,
+              notes,
+              spec: capturedSpec,
+              sopId: sop.id,
+              stages,
+              logs: processLogs,
+              parentVersionNo: null, // 下方按项目实际情况填充
+            };
+            // 失败运行没有新产物：保留所基于的代码（首轮失败则为空文件列表）
+            const files = result?.files ?? currentFiles ?? [];
+            const assistantText =
+              notes ?? (finalState === "done" ? "生成完成" : "生成失败");
+
             if (projectId) {
               // 对话迭代：追加版本到现有项目
               const versions = await getVersions(projectId);
               const nextVersionNo = versions.length + 1;
-              await createVersion(projectId, result.files, nextVersionNo);
+              process.parentVersionNo =
+                baseVersionNo ??
+                versions[versions.length - 1]?.version_no ??
+                null;
+              await createVersion(projectId, files, nextVersionNo, process);
               await createMessage(projectId, "user", input);
-              await createMessage(
-                projectId,
-                "assistant",
-                result.notes || "修改完成",
-              );
+              await createMessage(projectId, "assistant", assistantText);
               finalProjectId = projectId;
               send({
                 type: "project_updated",
@@ -198,15 +317,15 @@ export async function POST(req: NextRequest) {
             } else {
               // 首次生成：创建新项目
               const project = await createProject(input, user.id);
-              await createVersion(project.id, result.files, 1);
+              await createVersion(project.id, files, 1, process);
               await createMessage(project.id, "user", input);
-              await createMessage(
-                project.id,
-                "assistant",
-                result.notes || "生成完成",
-              );
+              await createMessage(project.id, "assistant", assistantText);
               finalProjectId = project.id;
-              send({ type: "project_created", projectId: finalProjectId });
+              send({
+                type: "project_created",
+                projectId: finalProjectId,
+                versionNo: 1,
+              });
             }
           } catch (dbErr) {
             send({

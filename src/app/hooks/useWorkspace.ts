@@ -719,6 +719,14 @@ export function useWorkspace() {
       const { gates } = (await res.json()) as { gates?: PendingGate[] };
       const gate = gates?.find((g) => g.payload?.spec);
       if (!gate) return false;
+      // follow-up 门（带 project_id）：直接走 openProject——真实版本列表 +
+      // 项目内门恢复路径已存在，且 lastPersistedProjectId / 版本号基准都正确，
+      // 避免合成空工作区导致续跑轮询永远等不到"新项目"
+      if (gate.project_id) {
+        await openProject(gate.project_id);
+        return true;
+      }
+      // 首轮门（project_id 为 null）：项目行尚未创建，合成仅含恢复卡片的工作区
       const id = ++versionId.current;
       const restored = buildRestoredGateVersion(id, gate);
       if (!restored) return false;
@@ -731,7 +739,7 @@ export function useWorkspace() {
     } catch {
       return false;
     }
-  }, [running, project]);
+  }, [running, project, openProject]);
 
   /** 从 Sidebar 打开示例项目（罐头演示） */
   const openScenario = useCallback(

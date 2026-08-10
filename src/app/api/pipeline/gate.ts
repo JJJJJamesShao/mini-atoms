@@ -103,7 +103,16 @@ export async function resolveApproval(
     console.error("[Gate] 更新挂起门失败:", err);
     updated = store.get(sessionId)?.userId === userId;
   }
-  if (!updated) return "not_found";
+  if (!updated) {
+    // DB 无此行：可能是挂起时 createGate 瞬时失败（降级内存态），
+    // 流水线仍存活——回退内存路径，与"降级不阻断流水线"的声明一致
+    const pending = store.get(sessionId);
+    if (!pending || pending.userId !== userId) return "not_found";
+    clearTimeout(pending.timer);
+    store.delete(sessionId);
+    pending.resolve(approved);
+    return "live";
+  }
 
   const pending = store.get(sessionId);
   if (!pending || pending.userId !== userId) return "recorded";

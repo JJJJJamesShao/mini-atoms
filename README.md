@@ -4,6 +4,12 @@
 
 **在线体验**: [https://mini-atoms.vercel.app](https://mini-atoms.vercel.app) _(替换为实际部署链接)_
 
+## Demo
+
+![数独生成 + 迭代修改](docs/demo.gif)
+
+_输入 "做一个数独游戏" → Agent 流水线自动生成 → 输入 "把背景改成深蓝色" → 基于现有代码增量修改_
+
 ---
 
 ## 30 秒速览

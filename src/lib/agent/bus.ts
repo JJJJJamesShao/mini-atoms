@@ -16,7 +16,14 @@ import { MessageTopic, type TypedMessage } from "./message";
 
 export interface AgentEvent {
   /** 事件类型 */
-  type: "agent:start" | "agent:thinking" | "agent:progress" | "agent:complete" | "agent:error" | "file:generated";
+  type:
+    | "agent:start"
+    | "agent:thinking"
+    | "agent:progress"
+    | "agent:summary"
+    | "agent:complete"
+    | "agent:error"
+    | "file:generated";
   /** Agent 名称（clarify/spec/generate/verify/fix） */
   agent: string;
   /** Agent 角色描述 */
@@ -121,7 +128,10 @@ export class AgentEventBus {
    * 按 Topic 订阅类型化消息
    * @returns 取消订阅函数
    */
-  subscribeTopic(topic: MessageTopic, handler: TypedMessageHandler): () => void {
+  subscribeTopic(
+    topic: MessageTopic,
+    handler: TypedMessageHandler,
+  ): () => void {
     if (!this.topicSubscribers.has(topic)) {
       this.topicSubscribers.set(topic, new Set());
     }
@@ -167,7 +177,12 @@ export class AgentEventBus {
   /**
    * 获取当前活跃订阅统计（调试用）
    */
-  stats(): { global: number; agents: Record<string, number>; topics: Record<string, number>; historySize: number } {
+  stats(): {
+    global: number;
+    agents: Record<string, number>;
+    topics: Record<string, number>;
+    historySize: number;
+  } {
     const agents: Record<string, number> = {};
     this.listeners.forEach((set, name) => {
       agents[name] = set.size;

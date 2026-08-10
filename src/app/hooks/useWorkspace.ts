@@ -281,6 +281,15 @@ export function useWorkspace() {
             return;
           }
 
+          if (ae.type === "agent:summary" && ae.agent === "generate") {
+            // 异步代码摘要：覆盖式更新，始终显示最新进度
+            const msg = ae.message ?? "";
+            setStage("generate", "active", msg);
+            pushLog("generate", "progress", msg);
+            updateVersion(id, (v) => ({ ...v, note: msg }));
+            return;
+          }
+
           if (ae.type === "agent:error") {
             setStage(
               agentStage,

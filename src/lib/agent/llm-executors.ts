@@ -23,6 +23,70 @@ import { AgentMemory } from "./memory";
 import { MessageTopic } from "./message";
 
 /**
+ * 异步代码摘要器 — 生成过程中定期把已产出的代码片段发给快模型，
+ * 返回"正在做什么"的一句话摘要，经 bus 推送前端，缓解长生成的"卡住感"。
+ *
+ * 设计约束：
+ * - 异步非阻塞（调用方用 void 触发，不 await）
+ * - 节流：最少间隔 10s 且新增 3000 字符才触发
+ * - 快模型（qwen3.6-flash），成本可忽略
+ * - 失败静默，绝不影响主生成流程
+ */
+export class CodeSummarizer {
+  private lastSummaryTime = 0;
+  private lastSummaryLength = 0;
+  private isSummarizing = false;
+
+  private readonly MIN_INTERVAL = 10000; // 最少 10s 间隔
+  private readonly MIN_CHARS = 3000; // 最少新增 3000 字符
+
+  /** summarizeFn 可注入（测试用）；默认走 qwen3.6-flash */
+  constructor(
+    private readonly summarizeFn: (
+      snippet: string,
+    ) => Promise<string> = defaultSummarize,
+  ) {}
+
+  /** 满足节流条件时异步生成摘要并回调；否则立即返回 */
+  async maybeSummarize(
+    content: string,
+    onSummary: (summary: string) => void,
+  ): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastSummaryTime < this.MIN_INTERVAL) return;
+    if (content.length - this.lastSummaryLength < this.MIN_CHARS) return;
+    if (this.isSummarizing) return; // 避免并发
+
+    this.isSummarizing = true;
+    this.lastSummaryTime = now;
+    this.lastSummaryLength = content.length;
+
+    try {
+      const summary = await this.summarizeFn(content.slice(-2000));
+      if (summary) onSummary(summary);
+    } catch (e) {
+      // 摘要失败静默处理，不影响主流程
+      console.warn("[Summarizer] failed:", e);
+    } finally {
+      this.isSummarizing = false;
+    }
+  }
+}
+
+/** 默认摘要实现：快模型一句话总结代码片段在做什么 */
+async function defaultSummarize(snippet: string): Promise<string> {
+  const response = await chat(MODEL_ROUTING.clarify, [
+    {
+      role: "system",
+      content:
+        "你是一位代码分析助手。请用一句话（不超过 20 个字）总结这段代码正在实现什么功能。只输出总结，不要解释。",
+    },
+    { role: "user", content: `代码片段：\n${snippet}` },
+  ]);
+  return response.choices[0]?.message?.content?.trim() ?? "";
+}
+
+/**
  * 实时收集流式响应，同时 emit 进度事件
  *
  * @param stream - OpenAI 流式响应
@@ -61,6 +125,7 @@ async function collectStreamWithProgress(
     },
   ];
   const emittedSections = new Set<string>();
+  const summarizer = new CodeSummarizer();
 
   for await (const chunk of stream) {
     // GLM-5.2：只收集 content（最终输出），忽略 reasoning_content（思考过程）
@@ -95,6 +160,18 @@ async function collectStreamWithProgress(
           message: `正在生成 ${marker.name}：${marker.desc}`,
         });
       }
+    }
+
+    // 异步代码摘要（节流 + 失败静默，不阻塞主流程）
+    if (bus) {
+      void summarizer.maybeSummarize(content, (summary) => {
+        bus.emit({
+          type: "agent:summary",
+          agent: "generate",
+          role: "前端工程师",
+          message: summary,
+        });
+      });
     }
   }
 

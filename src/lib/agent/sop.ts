@@ -292,8 +292,24 @@ export const FULLSTACK_SOP: SOPConfig = {
         ],
       },
     },
-    // 确定性合并：零 LLM 字符串组装（system 动作，不调用任何模型）
-    { name: "merge", role: "system", action: "merge", next: "verify" },
+    // 确定性合并：零 LLM 字符串组装（system 动作，不调用任何模型）。
+    // 缺页（missingPages 非空）→ fix-pages 重修，不得以缺页状态进最终 verify
+    {
+      name: "merge",
+      role: "system",
+      action: "merge",
+      next: {
+        default: "verify",
+        conditions: [
+          {
+            field: "missingPages",
+            operator: "ne",
+            value: "",
+            then: "fix-pages",
+          },
+        ],
+      },
+    },
     {
       name: "verify",
       role: "reviewer",

@@ -35,6 +35,15 @@ export function findPagePlaceholders(shellHtml: string): string[] {
   return [...shellHtml.matchAll(pattern)].map((m) => m[1]);
 }
 
+/** 缺页检测：shell 占位符在 pages 输出中无对应 PAGE 块（引擎据此进 fix-pages 重修） */
+export function findMissingPages(
+  shellHtml: string,
+  pagesText: string,
+): string[] {
+  const pages = splitPages(pagesText);
+  return findPagePlaceholders(shellHtml).filter((name) => !pages.has(name));
+}
+
 /**
  * 合并三阶段产物为单文件 HTML：
  * 1. shell 占位符 ← pages 对应代码块（缺失则留注释标记，由最终 verify 兜住）
@@ -50,6 +59,7 @@ export function mergeFullstack(
 
   for (const name of findPagePlaceholders(shellHtml)) {
     const placeholder = new RegExp(`<!--\\s*PAGE_CONTENT:\\s*${name}\\s*-->`);
+    // 缺页留注释标记（引擎 merge 步骤会检出并转 fix-pages 重修，此为兜底痕迹）
     const pageCode = pages.get(name) ?? `<!-- 页面 ${name} 的实现缺失 -->`;
     // 函数式替换：避免替换串中的 $& / $$ / $' 等模式被 String.replace 解释
     //（LLM 产物含 `$${price}` 这类文本时会被静默改写）

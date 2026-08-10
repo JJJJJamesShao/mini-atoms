@@ -305,4 +305,44 @@ describe("runSOP 执行引擎", () => {
       { stage: "pages", hasErrors: false },
     ]);
   });
+
+  it("fullstack-app：merge 检出缺页 → fix-pages 重修 → 补齐后 done", async () => {
+    const SHELL_TWO_PAGES =
+      "<!DOCTYPE html><html><head></head><body><!-- PAGE_CONTENT:home --><!-- PAGE_CONTENT:login --></body></html>";
+    let pagesCalls = 0;
+    const pagesErrorsSeen: boolean[] = [];
+    const executors: Executors = {
+      clarify: async () => READY_CLARIFY,
+      spec: async () => SPEC,
+      generate: async (_spec, errors, _files, _attempt, stage) => {
+        if (stage === "pages") {
+          pagesCalls++;
+          pagesErrorsSeen.push(Boolean(errors?.length));
+          // 第一次缺 login 块（触发 merge 缺页检测），第二次补齐
+          const content =
+            pagesCalls === 1
+              ? "// === PAGE: home ===\n<div>首页</div>"
+              : "// === PAGE: home ===\n<div>首页</div>\n// === PAGE: login ===\n<form>登录</form>";
+          return { files: [{ path: "pages.js", content }], notes: "ok" };
+        }
+        const content = stage === "schema" ? "const db = {};" : SHELL_TWO_PAGES;
+        return { files: [{ path: `${stage}.out`, content }], notes: "ok" };
+      },
+      verify: async () => VERIFY_OK,
+    };
+    const out = await runSOP(
+      "做一个带登录的博客",
+      FULLSTACK_SOP,
+      executors,
+      async () => true,
+    );
+
+    expect(out.finalState).toBe("done");
+    expect(pagesCalls).toBe(2);
+    // 第二次重修带着 merge-missing-page 错误信息
+    expect(pagesErrorsSeen).toEqual([false, true]);
+    const html = out.result?.files[0].content ?? "";
+    expect(html).toContain("<form>登录</form>");
+    expect(html).not.toContain("的实现缺失");
+  });
 });

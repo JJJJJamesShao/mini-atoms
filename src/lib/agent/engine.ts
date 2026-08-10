@@ -13,7 +13,7 @@ import type { Executors, Approver } from "./index";
 import type { AgentEventBus } from "./bus";
 import { createRoles, ROLES, type Role, type RoleId } from "./role";
 import { MessageTopic } from "./message";
-import { mergeFullstack } from "./merge";
+import { mergeFullstack, findMissingPages } from "./merge";
 import type { SOPCondition, SOPConfig, SOPStep } from "./sop";
 import type {
   ClarifyOutput,
@@ -332,14 +332,30 @@ async function executeStep(
         notes: `多阶段合并完成：schema ${schema.files[0]?.content.length ?? 0} 字符 + shell ${shell.files[0]?.content.length ?? 0} 字符 + pages ${pages.files[0]?.content.length ?? 0} 字符 → ${merged.length} 字符`,
       };
       ctx.generated = out;
+      // 缺页检测：pages 输出与 shell 占位符不匹配时，设置 lastErrors 并经
+      // SOP 条件分支（missingPages 非空）进 fix-pages 重修循环——不得以
+      // 缺页状态进入最终 verify（verifyProject 不认识 PAGE_CONTENT 标记）
+      const missingPages = findMissingPages(
+        shell.files[0]?.content ?? "",
+        pages.files[0]?.content ?? "",
+      );
+      if (missingPages.length > 0) {
+        ctx.lastErrors = missingPages.map((name) => ({
+          rule: "merge-missing-page",
+          message: `页面 ${name} 的实现缺失：pages 输出中缺少 // === PAGE: ${name} === 块`,
+        }));
+      }
       bus?.emit({
         type: "agent:complete",
         agent: step.name,
         role: roleName,
         output: out,
-        message: out.notes,
+        message:
+          missingPages.length > 0
+            ? `合并完成，但缺失页面：${missingPages.join("、")}，转入重修`
+            : out.notes,
       });
-      return out;
+      return { ...out, missingPages };
     }
     case "fix": {
       // fix 不调用执行器：记录次数并回退到 generate 重新生成。

@@ -106,8 +106,17 @@ export function useWorkspace() {
   const approvalSessionId = useRef<string | null>(null);
   /** 当前工作区对应的持久化项目 id（对话迭代时传给后端追加版本；新项目/罐头演示为 null） */
   const lastPersistedProjectId = useRef<string | null>(null);
+  /** 恢复模式的轮询定时器（刷新后确认，原流水线在后台续跑时轮询新版本落库） */
+  const resumePollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   /** 当前运行版本的阶段列表（由服务端 SOP 动态下发，默认完整流程） */
   const activeStages = useRef<readonly string[]>(STAGE_ORDER);
+
+  const stopResumePolling = useCallback(() => {
+    if (resumePollTimer.current) {
+      clearInterval(resumePollTimer.current);
+      resumePollTimer.current = null;
+    }
+  }, []);
 
   const updateVersion = useCallback(
     (id: number, fn: (v: Version) => Version) => {
@@ -134,9 +143,9 @@ export function useWorkspace() {
       activeVersionId.current = id;
       approvalSessionId.current = null;
       activeStages.current = STAGE_ORDER;
+      stopResumePolling(); // 新运行开始，停止恢复模式的轮询
       // 新项目必须先清空已持久化的项目 id，否则会被错误追加到上一个项目
       if (freshProject) lastPersistedProjectId.current = null;
-
       const title = request.length > 30 ? `${request.slice(0, 30)}…` : request;
       const version: Version = {
         id,
@@ -485,7 +494,7 @@ export function useWorkspace() {
         approvalSessionId.current = null;
       }
     },
-    [updateVersion],
+    [updateVersion, stopResumePolling],
   );
 
   /** 首页发起新项目：任何输入都直接交给后端 LLM 处理 */
@@ -615,6 +624,64 @@ export function useWorkspace() {
         setSelectedVersionId(versions[versions.length - 1]?.id ?? null);
         // 打开已有项目后，后续对话迭代应追加到该项目
         lastPersistedProjectId.current = projectId;
+
+        // 恢复挂起的确认门：刷新前卡在 approve 的运行，从 gates 表重建
+        // "等待确认"卡片，用户可继续决策（原流水线同进程存活时可真正续跑）
+        try {
+          const gatesRes = await fetch(
+            `/api/gates/pending?projectId=${projectId}`,
+          );
+          if (gatesRes.ok) {
+            const { gates } = (await gatesRes.json()) as {
+              gates?: Array<{
+                session_id: string;
+                payload: {
+                  spec?: SpecOutput;
+                  input?: string;
+                  baseVersionNo?: number | null;
+                } | null;
+              }>;
+            };
+            const gate = gates?.[0];
+            if (gate?.payload?.spec) {
+              const gid = ++versionId.current;
+              const input = gate.payload.input ?? "（刷新前未完成的生成）";
+              const title =
+                input.length > 30 ? `${input.slice(0, 30)}…` : input;
+              const approveIdx = STAGE_ORDER.indexOf("approve");
+              const restored: Version = {
+                id: gid,
+                versionNo: null,
+                parentVersionNo: gate.payload.baseVersionNo ?? null,
+                request: input,
+                scenarioTitle: title,
+                status: "awaiting",
+                stages: STAGE_ORDER.map((stage, i) => ({
+                  stage,
+                  status:
+                    i < approveIdx
+                      ? ("done" as const)
+                      : i === approveIdx
+                        ? ("active" as const)
+                        : ("pending" as const),
+                })),
+                spec: gate.payload.spec,
+                note: "规格待确认（页面刷新后恢复）",
+                html: null,
+              };
+              setProject((prev) =>
+                prev
+                  ? { ...prev, versions: [...prev.versions, restored] }
+                  : prev,
+              );
+              setSelectedVersionId(gid);
+              approvalSessionId.current = gate.session_id;
+              setAwaitingApproval(true);
+            }
+          }
+        } catch (err) {
+          console.error("[openProject] 恢复挂起门失败:", err);
+        }
       } catch (err) {
         console.error("[openProject]", err);
       }
@@ -652,24 +719,105 @@ export function useWorkspace() {
     [running],
   );
 
-  /** 用户决策 → 服务端确认门 */
-  const submitApproval = useCallback((approved: boolean) => {
-    const sessionId = approvalSessionId.current;
-    setAwaitingApproval(false);
-    if (!sessionId) return;
-    void fetch("/api/pipeline/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, approved }),
-    });
-  }, []);
+  /** 恢复模式轮询：原流水线在后台续跑，检测到新版本落库后全量重建工作区 */
+  const startResumePolling = useCallback(
+    (projectId: string) => {
+      stopResumePolling();
+      // 以数据库 version_no 为基准（客户端 versions 含合成卡片，数量不可比）
+      const knownMaxNo = Math.max(
+        0,
+        ...(project?.versions.map((v) => v.versionNo ?? 0) ?? []),
+      );
+      const startedAt = Date.now();
+      resumePollTimer.current = setInterval(() => {
+        void (async () => {
+          // 原流水线最长 300s（LLM 节点级超时）+ 落库余量
+          if (Date.now() - startedAt > 7 * 60 * 1000) {
+            stopResumePolling();
+            return;
+          }
+          try {
+            const res = await fetch(`/api/projects/${projectId}`);
+            if (!res.ok) return;
+            const data = (await res.json()) as {
+              versions?: Array<{ version_no?: number }>;
+            };
+            const maxNo = Math.max(
+              0,
+              ...(data.versions ?? []).map((v) => v.version_no ?? 0),
+            );
+            if (maxNo > knownMaxNo) {
+              stopResumePolling();
+              await openProject(projectId);
+            }
+          } catch {
+            // 轮询失败下一轮再试
+          }
+        })();
+      }, 5000);
+    },
+    [project, openProject, stopResumePolling],
+  );
+
+  /** 用户决策 → 服务端确认门；返回门状态（live=原流水线存活并已唤醒续跑） */
+  const submitApproval = useCallback(
+    async (approved: boolean): Promise<"live" | "recorded" | "failed"> => {
+      const sessionId = approvalSessionId.current;
+      setAwaitingApproval(false);
+      if (!sessionId) return "failed";
+      try {
+        const res = await fetch("/api/pipeline/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, approved }),
+        });
+        if (!res.ok) return "failed";
+        const data = (await res.json().catch(() => null)) as {
+          live?: boolean;
+        } | null;
+        return data?.live === true ? "live" : "recorded";
+      } catch {
+        return "failed";
+      }
+    },
+    [],
+  );
+
+  /** 恢复模式下的决策收尾：live 则轮询等待后台续跑结果，否则诚实降级 */
+  const settleRestoredDecision = useCallback(
+    (
+      id: number | null,
+      result: "live" | "recorded" | "failed",
+      approved: boolean,
+    ) => {
+      if (id === null) return;
+      if (result === "live" && lastPersistedProjectId.current) {
+        startResumePolling(lastPersistedProjectId.current);
+        return;
+      }
+      if (result !== "live") {
+        updateVersion(id, (v) => ({
+          ...v,
+          status: "failed",
+          note: approved
+            ? "原生成已随服务重启终止，请基于当前版本重新发起修改"
+            : "已记录你的拒绝；原生成已随服务重启终止",
+        }));
+      }
+    },
+    [startResumePolling, updateVersion],
+  );
 
   const approve = useCallback(() => {
-    const id = activeVersionId.current;
+    // 恢复模式：刷新后没有活跃运行（activeVersionId 为 null），
+    // 决策作用于当前选中的恢复卡片
+    const isRestored = activeVersionId.current === null;
+    const id = activeVersionId.current ?? selectedVersionId;
     if (id !== null) {
       updateVersion(id, (v) => ({
         ...v,
         status: "running",
+        note: isRestored ? "已确认，后台生成中…（完成后自动刷新）" : v.note,
         stages: v.stages.map((s) =>
           s.stage === "approve"
             ? { ...s, status: "done", detail: "用户已确认规格" }
@@ -677,15 +825,23 @@ export function useWorkspace() {
         ),
       }));
     }
-    submitApproval(true);
-  }, [updateVersion, submitApproval]);
+    void submitApproval(true).then((result) => {
+      if (isRestored) settleRestoredDecision(id, result, true);
+    });
+  }, [
+    updateVersion,
+    submitApproval,
+    selectedVersionId,
+    settleRestoredDecision,
+  ]);
 
   const reject = useCallback(() => {
-    const id = activeVersionId.current;
+    const isRestored = activeVersionId.current === null;
+    const id = activeVersionId.current ?? selectedVersionId;
     if (id !== null) {
       updateVersion(id, (v) => ({
         ...v,
-        status: "running",
+        status: isRestored ? v.status : "running",
         stages: v.stages.map((s) =>
           s.stage === "approve"
             ? { ...s, status: "failed", detail: "用户拒绝规格" }
@@ -693,8 +849,15 @@ export function useWorkspace() {
         ),
       }));
     }
-    submitApproval(false);
-  }, [updateVersion, submitApproval]);
+    void submitApproval(false).then((result) => {
+      if (isRestored) settleRestoredDecision(id, result, false);
+    });
+  }, [
+    updateVersion,
+    submitApproval,
+    selectedVersionId,
+    settleRestoredDecision,
+  ]);
 
   return {
     project,

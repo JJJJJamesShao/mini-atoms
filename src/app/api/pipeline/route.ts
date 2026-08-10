@@ -308,11 +308,15 @@ export async function POST(req: NextRequest) {
 
         // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm
         //（仅含 approve 步骤的 SOP 会调用；game SOP 自动跳过）
+        // 双写 gates 表：刷新后前端可从 /api/gates/pending 重建等待确认 UI
         const sessionId = crypto.randomUUID();
         const approver = async (spec: SpecOutput) => {
           capturedSpec = spec; // 落库用：记录用户确认的规格
           send({ type: "approve_needed", sessionId, spec });
-          return waitForApproval(sessionId, user.id);
+          return waitForApproval(sessionId, user.id, {
+            projectId: projectId ?? null,
+            payload: { spec, input, baseVersionNo: baseVersionNo ?? null },
+          });
         };
 
         // 前端按 sop.steps 动态生成阶段卡片（fix 为内部步骤，不下发）

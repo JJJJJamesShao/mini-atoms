@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 import { createProject, getProjects } from "../src/lib/db/projects";
 import { createVersion, getVersions } from "../src/lib/db/versions";
 import { createMessage, getMessages } from "../src/lib/db/messages";
+import {
+  createGate,
+  expireGate,
+  getPendingGates,
+  resolveGate,
+} from "../src/lib/db/gates";
 import { getUserRole, setUserRole } from "../src/lib/db/profiles";
 import { countUsageToday, logUsage } from "../src/lib/db/usage";
 import { getSupabase } from "../src/lib/supabase/server";
@@ -134,6 +140,95 @@ describe.skipIf(!hasEnv)("数据库操作（真实 Supabase）", () => {
     await getSupabase().from("messages").delete().eq("id", message.id);
     await getSupabase().from("projects").delete().eq("id", project.id);
   });
+});
+
+describe.skipIf(!hasEnv)("挂起门持久化（真实 Supabase）", () => {
+  it(
+    "createGate / getPendingGates / resolveGate / 惰性过期",
+    { timeout: 20000 }, // 十余次串行远端调用，默认 5s 易抖动
+    async () => {
+      const supabase = getSupabase();
+      const email = `gate-test-${Date.now()}@example.com`;
+      const { data, error } = await supabase.auth.admin.createUser({
+        email,
+        password: "test-pass-123456",
+        email_confirm: true,
+      });
+      if (error) throw error;
+      const uid = data.user.id;
+      const project = await createProject("门测试", uid);
+
+      try {
+        const payload = {
+          spec: {
+            requirements: ["r1"],
+            constraints: ["c1"],
+            userStories: ["u1"],
+          },
+          input: "做一个计算器",
+          baseVersionNo: null,
+        };
+        // 随机后缀：session_id 有 unique 约束，避免上次运行残留行导致插入失败
+        const tag = crypto.randomUUID().slice(0, 8);
+        const s1 = `session-${tag}-1`;
+        const s2 = `session-${tag}-2`;
+        const s3 = `session-${tag}-3`;
+
+        // 创建挂起门 → pending 查询可见，payload 完整
+        await createGate(
+          s1,
+          project.id,
+          uid,
+          "approve",
+          payload,
+          30 * 60 * 1000,
+        );
+        let pending = await getPendingGates(uid, project.id);
+        expect(pending).toHaveLength(1);
+        expect(pending[0].payload).toMatchObject({ input: "做一个计算器" });
+
+        // 他人不能 resolve（归属校验；用合法 UUID 绕过类型层，直接验证 eq 不命中）
+        expect(await resolveGate(s1, crypto.randomUUID(), "approved")).toBe(
+          false,
+        );
+        // 本人 resolve → approved，不再出现在 pending
+        expect(await resolveGate(s1, uid, "approved")).toBe(true);
+        pending = await getPendingGates(uid, project.id);
+        expect(pending).toHaveLength(0);
+        // 重复 resolve 返回 false（非 pending）
+        expect(await resolveGate(s1, uid, "approved")).toBe(false);
+
+        // 惰性过期：创建一个已过期（timeoutMs 为负）的 pending 门
+        await createGate(s2, project.id, uid, "approve", payload, -1000);
+        pending = await getPendingGates(uid, project.id);
+        expect(pending).toHaveLength(0);
+        // 过期行已被标记为 expired
+        const { data: rows } = await supabase
+          .from("gates")
+          .select("status")
+          .eq("session_id", s2)
+          .single();
+        expect(rows?.status).toBe("expired");
+
+        // expireGate：pending → expired
+        await createGate(
+          s3,
+          project.id,
+          uid,
+          "approve",
+          payload,
+          30 * 60 * 1000,
+        );
+        await expireGate(s3);
+        pending = await getPendingGates(uid, project.id);
+        expect(pending).toHaveLength(0);
+      } finally {
+        await supabase.from("gates").delete().eq("user_id", uid);
+        await supabase.from("projects").delete().eq("id", project.id);
+        await supabase.auth.admin.deleteUser(uid);
+      }
+    },
+  );
 });
 
 describe.skipIf(!hasEnv)("RBAC 与限流（真实 Supabase）", () => {

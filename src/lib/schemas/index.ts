@@ -11,6 +11,11 @@ export const ClarifyOutputSchema = z.object({
     }),
   ),
   summary: z.string(),
+  /** 深度调优版 prompt 的结构化扩展字段（可选，向后兼容） */
+  requirements: z.array(z.string()).optional(),
+  constraints: z.array(z.string()).optional(),
+  assumptions: z.array(z.string()).optional(),
+  openQuestions: z.array(z.string()).optional(),
 });
 export type ClarifyOutput = z.infer<typeof ClarifyOutputSchema>;
 

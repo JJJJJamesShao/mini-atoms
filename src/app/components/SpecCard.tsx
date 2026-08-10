@@ -46,7 +46,7 @@ export default function SpecCard({
             {title}
           </h4>
           <ul className="mt-1 list-disc pl-4 text-sm space-y-0.5">
-            {spec[key].map((item, i) => (
+            {(spec[key] ?? []).map((item, i) => (
               <li key={i}>{item}</li>
             ))}
           </ul>

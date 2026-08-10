@@ -16,17 +16,23 @@ const SYSTEM_CLARIFY = `你是一位资深产品经理，擅长将模糊的用�
 必须输出以下 JSON 结构，不要包裹 markdown 代码块：
 
 {
+  "status": "ready 或 need_clarification",
+  "summary": "一句话总结用户需求的要点",
   "requirements": ["核心需求1", "核心需求2"],
   "constraints": ["约束1", "约束2"],
   "assumptions": ["假设1", "假设2"],
   "openQuestions": ["待澄清问题1"]
 }
 
+status 判定：需求明确（如"做一个待办清单"）直接 ready；只有明显缺失关键信息时才 need_clarification，不要过度追问。
+
 ## 示例
 
 用户输入："做一个计算器"
 你的输出：
 {
+  "status": "ready",
+  "summary": "单文件 HTML 标准计算器，支持四则运算",
   "requirements": ["支持基本四则运算", "支持输入数字和运算符", "显示计算结果"],
   "constraints": ["单文件 HTML", "无外部依赖", "原生 JS 实现"],
   "assumptions": ["默认为标准计算器，非科学计算器", "支持键盘输入"],
@@ -36,6 +42,8 @@ const SYSTEM_CLARIFY = `你是一位资深产品经理，擅长将模糊的用�
 用户输入："做一个俄罗斯方块"
 你的输出：
 {
+  "status": "ready",
+  "summary": "Canvas 俄罗斯方块，含消行、加速与计分",
   "requirements": [
     "7 种不同形状的方块（I, O, T, S, Z, J, L）",
     "方块可以左右移动和旋转",
@@ -78,6 +86,7 @@ const SYSTEM_SPEC = `你是一位前端架构师，负责将产品需求转化�
   "summary": "一句话描述实现方案",
   "requirements": ["技术需求1", "技术需求2"],
   "constraints": ["技术约束1", "技术约束2"],
+  "userStories": ["作为...我可以...以便..."],
   "architecture": {
     "type": "单页面应用 | 多页面应用 | 游戏",
     "ui": ["组件1", "组件2"],
@@ -235,81 +244,16 @@ const SYSTEM_GENERATE = `你是一位资深前端工程师，负责根据技术�
 5. 错误处理：防止常见错误（null 引用、数组越界）
 6. 性能优化：使用 requestAnimationFrame、避免内存泄漏`;
 
-const SYSTEM_FIX = `你是一位资深前端代码审查员，负责分析代码错误并给出精确的修复方案。
+// 注意：完整重写修复路径专用。Search/Replace 增量修复走 SYSTEM_PATCH + buildPatchPrompt，
+// 两者输出格式不同，不可混用（此前混用会导致 fix 路径产出 Patch 文本而非完整 HTML）。
+const SYSTEM_FIX = `你是一位前端工程师，之前生成的代码在校验阶段发现了错误。
+请根据错误信息修复代码，重新输出完整的 HTML 文件。
 
-## 核心职责
-
-1. **分析错误信息**：理解校验工具报告的错误（语法、安全、结构）
-2. **定位问题代码**：找到错误的具体位置
-3. **给出修复方案**：用 Search/Replace 格式输出精确的修改指令
-4. **保持最小修改**：只修复报错的部分，不改正确代码
-
-## 修复原则
-
-1. **精确匹配**：SEARCH 块必须与原始代码完全一致（包括空格、缩进、换行）
-2. **最小修改**：只改报错的部分，不要重构整个文件
-3. **保持功能**：修复后功能必须完整，不能引入新 bug
-4. **完整输出**：即使只改一行，也要输出包含完整上下文的 SEARCH/REPLACE
-
-## 输出格式（Search/Replace）
-
-每个修改使用如下格式，不要输出任何解释文字：
-
-<<<<<<< SEARCH
-[要替换的原始代码，必须精确匹配]
-=======
-[修复后的新代码]
->>>>>>> REPLACE
-
-## 修复示例
-
-### 示例 1：语法错误
-
-<<<<<<< SEARCH
-var b = ;
-=======
-var b = 0;
->>>>>>> REPLACE
-
-### 示例 2：缺少 DOCTYPE
-
-<<<<<<< SEARCH
-<html>
-=======
-<!DOCTYPE html>
-<html>
->>>>>>> REPLACE
-
-### 示例 3：安全错误（外部脚本）
-
-<<<<<<< SEARCH
-<script src="https://cdn.example.com/lib.js"></script>
-=======
-<!-- 外部脚本已移除，相关功能用原生 JS 实现 -->
->>>>>>> REPLACE
-
-### 示例 4：内联事件处理器
-
-<<<<<<< SEARCH
-<button onclick="startGame()">开始</button>
-=======
-<button id="startBtn">开始</button>
->>>>>>> REPLACE
-
-## 修复策略
-
-优先级：
-1. 语法错误优先：代码有语法错误必须先修复
-2. 安全错误次之：XSS 向量、危险标签必须移除
-3. 结构错误最后：缺少 DOCTYPE、外部资源等
-
-常见修复模式：
-- var x = ; → 补全值：var x = 0;
-- function() { 缺少 } → 补全括号
-- ' 未闭合 → 补全引号或改用 "
-- 缺少 DOCTYPE → 在 <html> 前添加
-- 外部脚本 → 移除 <script src>，内联或删除
-- 内联事件 onclick → 移除属性，改用 addEventListener`;
+**修复原则**：
+1. 只修复报错的语法/结构问题
+2. 保持原有功能和样式不变
+3. 输出完整的修复后代码，不要只输出修改的部分
+4. 直接输出 HTML 代码，不要使用 Search/Replace 格式，不要包裹 markdown 代码块`;
 
 // ===== 游戏专用 Prompt（已优化） =====
 

@@ -369,7 +369,7 @@ export function createLLMExecutors(
           );
           // 流式 + 超时保护（与主生成路径同一套 60s idle / 300s total）
           let lastStageEmit = 0;
-          const content = await collectStreamText(
+          const rawContent = await collectStreamText(
             await streamChat(MODEL_ROUTING.generate, messages),
             { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
             (acc) => {
@@ -384,6 +384,9 @@ export function createLLMExecutors(
               }
             },
           );
+          // 剥离可能的 markdown 围栏（与主生成路径 extractHtml 对齐，
+          // 模型用 ``` 包裹时不过阶段校验会白耗 fix 轮次）
+          const content = extractHtml(rawContent);
 
           const result: GenerateOutput = {
             files: [{ path: stageFile, content: content.trim() }],
@@ -685,7 +688,7 @@ export function createLLMExecutors(
         console.error("[Generate Error]", errorMsg, err);
         bus?.emit({
           type: "agent:error",
-          agent: "generate",
+          agent: agentName,
           role: "前端工程师",
           error: errorMsg,
         });

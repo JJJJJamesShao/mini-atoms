@@ -281,10 +281,13 @@ async function executeStep(
     case "generate": {
       if (!ctx.spec) throw new Error("generate 步骤缺少 spec 产物");
       const stage = stageOfStep(step.name);
-      // fix 模式（有校验错误）：重修当前阶段产物（ctx.generated 即该阶段上次输出）；
-      // 否则传入前置阶段产物（shell 引用 schema、pages 引用 schema+shell）
+      // fix 模式（有校验错误）：重修当前阶段产物——优先取该阶段自己的上次输出
+      // （最终 verify 失败回 generate-pages 时 ctx.generated 已是 merge 产物，
+      // 直接用它会把 index.html 当成 pages 上下文，契约错位）
       const currentFiles = ctx.lastErrors?.length
-        ? (ctx.generated?.files ?? stageInputFiles(ctx, stage))
+        ? ((stage ? ctx.stageOutputs[stage]?.files : undefined) ??
+          ctx.generated?.files ??
+          stageInputFiles(ctx, stage))
         : stageInputFiles(ctx, stage);
       const out = await executors.generate(
         ctx.spec,

@@ -118,6 +118,11 @@ const SYSTEM_SPEC = `你是一位前端架构师，负责将产品需求转化�
     "无外部依赖",
     "响应式布局"
   ],
+  "userStories": [
+    "作为用户，我可以输入任务并回车添加，以便快速记录待办事项",
+    "作为用户，我可以勾选任务标记完成，以便跟踪进度",
+    "作为用户，我可以删除不需要的任务，以便保持列表整洁"
+  ],
   "architecture": {
     "type": "单页面应用",
     "ui": ["标题栏", "输入框+添加按钮", "任务列表", "过滤标签(全部/未完成/已完成)"],
@@ -146,6 +151,10 @@ const SYSTEM_SPEC = `你是一位前端架构师，负责将产品需求转化�
     "单文件 HTML，Canvas 渲染",
     "原生 JS，无外部库",
     "键盘方向键控制"
+  ],
+  "userStories": [
+    "作为玩家，我可以用方向键控制蛇移动，以便吃到食物得分",
+    "作为玩家，我可以在游戏结束后点击重新开始，以便再次挑战"
   ],
   "architecture": {
     "type": "游戏",
@@ -420,9 +429,6 @@ export function buildGameGeneratePrompt(
   spec: SpecOutput,
   errors?: VerifyResult["errors"],
 ): Array<{ role: "system" | "user"; content: string }> {
-  const requirements = spec.requirements.join("，");
-  const constraints = spec.constraints.join("，");
-
   let userContent =
     "规格：\n- " +
     spec.requirements.join("\n- ") +

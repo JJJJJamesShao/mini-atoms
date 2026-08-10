@@ -3,13 +3,16 @@ import { z } from "zod";
 /** 需求澄清节点输出 */
 export const ClarifyOutputSchema = z.object({
   status: z.enum(["need_clarification", "ready"]),
-  questions: z.array(
-    z.object({
-      id: z.string(),
-      question: z.string(),
-      options: z.array(z.string()),
-    }),
-  ),
+  /** 深度调优版 prompt 改由 openQuestions 承担待澄清问题，此字段保留兼容旧输出 */
+  questions: z
+    .array(
+      z.object({
+        id: z.string(),
+        question: z.string(),
+        options: z.array(z.string()),
+      }),
+    )
+    .optional(),
   summary: z.string(),
   /** 深度调优版 prompt 的结构化扩展字段（可选，向后兼容） */
   requirements: z.array(z.string()).optional(),

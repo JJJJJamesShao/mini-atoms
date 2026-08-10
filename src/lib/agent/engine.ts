@@ -31,6 +31,8 @@ export interface SOPRunResult {
   finalState: "done" | "fail";
   /** 失败原因：need_clarification / spec_rejected / verify_failed */
   reason: string | null;
+  /** reason 为 need_clarification 时，模型希望用户补充的问题清单（软着陆引导用） */
+  questions?: string[];
   /** finalState 为 done 时的生成产物 */
   result?: GenerateOutput;
 }
@@ -117,7 +119,17 @@ export async function runSOP(
     const next = resolveNext(step, output);
 
     if (next === "fail") {
-      return { sop, finalState: "fail", reason: deriveFailReason(step) };
+      const reason = deriveFailReason(step);
+      const runResult: SOPRunResult = { sop, finalState: "fail", reason };
+      // 软着陆：澄清不足不掐死任务，把模型想确认的问题透传给前端引导用户补充
+      if (reason === "need_clarification") {
+        const clarifyOut = output as ClarifyOutput | null;
+        const questions = clarifyOut?.openQuestions?.length
+          ? clarifyOut.openQuestions
+          : clarifyOut?.questions?.map((q) => q.question);
+        if (questions?.length) runResult.questions = questions;
+      }
+      return runResult;
     }
     current = next || undefined;
   }

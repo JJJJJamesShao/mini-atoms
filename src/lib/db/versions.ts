@@ -27,6 +27,8 @@ export interface ProcessData {
   logs: ProcessLog[];
   /** 分叉基准：本版本基于哪个 version_no 修改（首版为 null） */
   parentVersionNo: number | null;
+  /** need_clarification 软着陆：待用户补充的澄清问题清单（003_clarify_questions.sql） */
+  questions: string[] | null;
 }
 
 export interface VersionRow {
@@ -45,6 +47,7 @@ export interface VersionRow {
   stages: StageState[] | null;
   logs: ProcessLog[] | null;
   parent_version_no: number | null;
+  questions: string[] | null;
 }
 
 export async function createVersion(
@@ -68,6 +71,7 @@ export async function createVersion(
             stages: process.stages,
             logs: process.logs,
             parent_version_no: process.parentVersionNo,
+            questions: process.questions,
           }
         : {}),
     })

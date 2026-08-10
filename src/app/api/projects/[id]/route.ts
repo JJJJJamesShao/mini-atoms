@@ -54,6 +54,7 @@ export async function GET(
         stages: v.stages,
         logs: v.logs,
         parent_version_no: v.parent_version_no,
+        questions: v.questions,
       })),
       latestHtml: html,
     });

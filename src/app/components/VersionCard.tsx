@@ -26,6 +26,11 @@ const STATUS_PILLS: Record<
     label: "已失败",
     className: "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300",
   },
+  need_input: {
+    label: "待补充",
+    className:
+      "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+  },
 };
 
 /** 质量评分组件 */
@@ -125,6 +130,22 @@ export default function VersionCard({
               />
             </div>
           )}
+
+          {/* 软着陆引导：澄清不足时列出模型想确认的问题，引导用户补充而非判负 */}
+          {version.status === "need_input" &&
+            version.questions &&
+            version.questions.length > 0 && (
+              <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 dark:bg-amber-950/40">
+                <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                  请补充以下信息，然后在下方输入框继续：
+                </p>
+                <ol className="mt-1 list-decimal space-y-0.5 pl-4 text-xs text-amber-700 dark:text-amber-400">
+                  {version.questions.map((q, i) => (
+                    <li key={i}>{q}</li>
+                  ))}
+                </ol>
+              </div>
+            )}
 
           {version.note && (
             <p

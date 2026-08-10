@@ -73,26 +73,28 @@ describe.skipIf(!hasEnv)("数据库操作（真实 Supabase）", () => {
           { seq: 2, stage: "clarify", phase: "end", timestamp: Date.now() },
         ],
         parentVersionNo: null,
+        questions: null,
       },
     );
-    // 分叉版本：基于 v1 修改
+    // 分叉版本：基于 v1 修改（need_input 软着陆：带澄清问题清单）
     const v2 = await createVersion(
       project.id,
       [{ path: "index.html", content: "<h1>v2</h1>" }],
       2,
       {
-        request: "改成深色模式",
+        request: "帮我弄个页面",
         notes: null, // 失败运行：notes 为空但过程仍在
         spec: null,
         sopId: "web-app",
         stages: [
           { stage: "clarify", status: "done" },
-          { stage: "generate", status: "failed", detail: "校验未通过" },
+          { stage: "spec", status: "pending" },
         ],
         logs: [
-          { seq: 1, stage: "generate", phase: "start", timestamp: Date.now() },
+          { seq: 1, stage: "clarify", phase: "start", timestamp: Date.now() },
         ],
         parentVersionNo: 1,
+        questions: ["页面主题是什么？", "需要哪些功能模块？"],
       },
     );
 
@@ -112,7 +114,9 @@ describe.skipIf(!hasEnv)("数据库操作（真实 Supabase）", () => {
 
     const r2 = versions.find((v) => v.id === v2.id)!;
     expect(r2.parent_version_no).toBe(1);
-    expect(r2.stages![1].status).toBe("failed");
+    expect(r2.stages![1].status).toBe("pending");
+    expect(r2.questions).toHaveLength(2);
+    expect(r2.questions![0]).toBe("页面主题是什么？");
 
     await getSupabase().from("versions").delete().eq("project_id", project.id);
     await getSupabase().from("projects").delete().eq("id", project.id);

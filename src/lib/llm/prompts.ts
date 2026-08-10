@@ -24,7 +24,7 @@ const SYSTEM_CLARIFY = `你是一位资深产品经理，擅长将模糊的用�
   "openQuestions": ["待澄清问题1"]
 }
 
-status 判定：需求明确（如"做一个待办清单"）直接 ready；只有明显缺失关键信息时才 need_clarification，不要过度追问。
+status 判定：默认输出 ready——即使信息不全，也把缺失点记入 assumptions 并按最大众化的假设继续；只有完全无法理解用户意图（如无意义文本、与建站无关的内容）时才允许 need_clarification，且此时必须把需要用户补充的关键问题写入 openQuestions（这些问题会直接展示给用户，要具体、可回答）。
 
 ## 示例
 

@@ -18,3 +18,7 @@ create table if not exists public.gates (
 
 create index if not exists gates_session_idx on public.gates (session_id);
 create index if not exists gates_user_idx on public.gates (user_id, status);
+
+-- 与 projects/versions 等既有表一致：启用 RLS 但不建 policy，
+-- anon key 默认拒绝直读，读写全走 service role（payload 含用户 input/spec，必须防直读）
+alter table if exists public.gates enable row level security;

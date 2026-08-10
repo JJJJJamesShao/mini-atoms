@@ -84,6 +84,49 @@ function failReasonText(reason: string | null): string {
   }
 }
 
+/** 挂起门（/api/gates/pending 返回的行，仅取前端需要的字段） */
+interface PendingGate {
+  session_id: string;
+  project_id?: string | null;
+  created_at?: string;
+  payload: {
+    spec?: SpecOutput;
+    input?: string;
+    baseVersionNo?: number | null;
+  } | null;
+}
+
+/** 挂起门 → awaiting 恢复卡片（openProject 项目内恢复与首页全局恢复共用） */
+function buildRestoredGateVersion(
+  id: number,
+  gate: PendingGate,
+): Version | null {
+  if (!gate.payload?.spec) return null;
+  const input = gate.payload.input ?? "（刷新前未完成的生成）";
+  const title = input.length > 30 ? `${input.slice(0, 30)}…` : input;
+  const approveIdx = STAGE_ORDER.indexOf("approve");
+  return {
+    id,
+    versionNo: null,
+    parentVersionNo: gate.payload.baseVersionNo ?? null,
+    request: input,
+    scenarioTitle: title,
+    status: "awaiting",
+    stages: STAGE_ORDER.map((stage, i) => ({
+      stage,
+      status:
+        i < approveIdx
+          ? ("done" as const)
+          : i === approveIdx
+            ? ("active" as const)
+            : ("pending" as const),
+    })),
+    spec: gate.payload.spec,
+    note: "规格待确认（页面刷新后恢复）",
+    html: null,
+  };
+}
+
 /**
  * 工作区状态管理：项目 + 多版本。
  * 每个版本对应一次 /api/pipeline SSE 运行，approve 确认门经
@@ -108,6 +151,8 @@ export function useWorkspace() {
   const lastPersistedProjectId = useRef<string | null>(null);
   /** 恢复模式的轮询定时器（刷新后确认，原流水线在后台续跑时轮询新版本落库） */
   const resumePollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** 首轮恢复的门的创建时间（新项目轮询按 created_at 识别新建项目行） */
+  const restoredGateCreatedAt = useRef<string | null>(null);
   /** 当前运行版本的阶段列表（由服务端 SOP 动态下发，默认完整流程） */
   const activeStages = useRef<readonly string[]>(STAGE_ORDER);
 
@@ -633,50 +678,22 @@ export function useWorkspace() {
           );
           if (gatesRes.ok) {
             const { gates } = (await gatesRes.json()) as {
-              gates?: Array<{
-                session_id: string;
-                payload: {
-                  spec?: SpecOutput;
-                  input?: string;
-                  baseVersionNo?: number | null;
-                } | null;
-              }>;
+              gates?: PendingGate[];
             };
             const gate = gates?.[0];
-            if (gate?.payload?.spec) {
+            if (gate) {
               const gid = ++versionId.current;
-              const input = gate.payload.input ?? "（刷新前未完成的生成）";
-              const title =
-                input.length > 30 ? `${input.slice(0, 30)}…` : input;
-              const approveIdx = STAGE_ORDER.indexOf("approve");
-              const restored: Version = {
-                id: gid,
-                versionNo: null,
-                parentVersionNo: gate.payload.baseVersionNo ?? null,
-                request: input,
-                scenarioTitle: title,
-                status: "awaiting",
-                stages: STAGE_ORDER.map((stage, i) => ({
-                  stage,
-                  status:
-                    i < approveIdx
-                      ? ("done" as const)
-                      : i === approveIdx
-                        ? ("active" as const)
-                        : ("pending" as const),
-                })),
-                spec: gate.payload.spec,
-                note: "规格待确认（页面刷新后恢复）",
-                html: null,
-              };
-              setProject((prev) =>
-                prev
-                  ? { ...prev, versions: [...prev.versions, restored] }
-                  : prev,
-              );
-              setSelectedVersionId(gid);
-              approvalSessionId.current = gate.session_id;
-              setAwaitingApproval(true);
+              const restored = buildRestoredGateVersion(gid, gate);
+              if (restored) {
+                setProject((prev) =>
+                  prev
+                    ? { ...prev, versions: [...prev.versions, restored] }
+                    : prev,
+                );
+                setSelectedVersionId(gid);
+                approvalSessionId.current = gate.session_id;
+                setAwaitingApproval(true);
+              }
             }
           }
         } catch (err) {
@@ -688,6 +705,33 @@ export function useWorkspace() {
     },
     [running],
   );
+
+  /**
+   * 全局挂起门恢复（首页挂载时调用）：首轮生成的门 project_id 为 null，
+   * openProject 的项目内查询覆盖不到，必须不带 projectId 全局查询。
+   * 返回 true 表示恢复了待确认卡片（调用方应切换到工作区视图）。
+   */
+  const restorePendingGate = useCallback(async (): Promise<boolean> => {
+    if (running || project) return false;
+    try {
+      const res = await fetch("/api/gates/pending");
+      if (!res.ok) return false;
+      const { gates } = (await res.json()) as { gates?: PendingGate[] };
+      const gate = gates?.find((g) => g.payload?.spec);
+      if (!gate) return false;
+      const id = ++versionId.current;
+      const restored = buildRestoredGateVersion(id, gate);
+      if (!restored) return false;
+      restoredGateCreatedAt.current = gate.created_at ?? null;
+      setProject({ title: restored.scenarioTitle, versions: [restored] });
+      setSelectedVersionId(id);
+      approvalSessionId.current = gate.session_id;
+      setAwaitingApproval(true);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [running, project]);
 
   /** 从 Sidebar 打开示例项目（罐头演示） */
   const openScenario = useCallback(
@@ -731,8 +775,9 @@ export function useWorkspace() {
       const startedAt = Date.now();
       resumePollTimer.current = setInterval(() => {
         void (async () => {
-          // 原流水线最长 300s（LLM 节点级超时）+ 落库余量
-          if (Date.now() - startedAt > 7 * 60 * 1000) {
+          // 最坏时长：generate 300s + 至多 5 轮 fix 重试（MAX_FIX_ATTEMPTS）
+          // 每轮都可能吃满节点超时，25 分钟覆盖极端慢路径
+          if (Date.now() - startedAt > 25 * 60 * 1000) {
             stopResumePolling();
             return;
           }
@@ -759,9 +804,51 @@ export function useWorkspace() {
     [project, openProject, stopResumePolling],
   );
 
+  /** 首轮恢复轮询：项目行尚未创建（门 project_id 为 null），
+      轮询项目列表直到出现 created_at 晚于门创建时间的新项目 */
+  const startNewProjectPolling = useCallback(
+    (gateCreatedAt: string | null) => {
+      stopResumePolling();
+      const threshold = gateCreatedAt
+        ? new Date(gateCreatedAt).getTime() - 5000
+        : 0;
+      const startedAt = Date.now();
+      resumePollTimer.current = setInterval(() => {
+        void (async () => {
+          // 与 startResumePolling 同窗口：覆盖 5 轮 fix 的极端慢路径
+          if (Date.now() - startedAt > 25 * 60 * 1000) {
+            stopResumePolling();
+            return;
+          }
+          try {
+            const res = await fetch("/api/projects");
+            if (!res.ok) return;
+            const data = (await res.json()) as {
+              projects?: Array<{ id: string; created_at?: string }>;
+            };
+            const created = (data.projects ?? []).find(
+              (p) =>
+                p.created_at && new Date(p.created_at).getTime() >= threshold,
+            );
+            if (created) {
+              stopResumePolling();
+              lastPersistedProjectId.current = created.id;
+              await openProject(created.id);
+            }
+          } catch {
+            // 轮询失败下一轮再试
+          }
+        })();
+      }, 5000);
+    },
+    [openProject, stopResumePolling],
+  );
+
   /** 用户决策 → 服务端确认门；返回门状态（live=原流水线存活并已唤醒续跑） */
   const submitApproval = useCallback(
-    async (approved: boolean): Promise<"live" | "recorded" | "failed"> => {
+    async (
+      approved: boolean,
+    ): Promise<"live" | "recorded" | "expired" | "failed"> => {
       const sessionId = approvalSessionId.current;
       setAwaitingApproval(false);
       if (!sessionId) return "failed";
@@ -771,6 +858,8 @@ export function useWorkspace() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, approved }),
         });
+        // 404 = 会话不存在或已过期（区别于网络抖动，文案需诚实）
+        if (res.status === 404) return "expired";
         if (!res.ok) return "failed";
         const data = (await res.json().catch(() => null)) as {
           live?: boolean;
@@ -783,29 +872,52 @@ export function useWorkspace() {
     [],
   );
 
-  /** 恢复模式下的决策收尾：live 则轮询等待后台续跑结果，否则诚实降级 */
+  /** 恢复模式下的决策收尾：live 则轮询等待后台续跑结果，否则按真实原因降级 */
   const settleRestoredDecision = useCallback(
     (
       id: number | null,
-      result: "live" | "recorded" | "failed",
+      result: "live" | "recorded" | "expired" | "failed",
       approved: boolean,
     ) => {
       if (id === null) return;
-      if (result === "live" && lastPersistedProjectId.current) {
-        startResumePolling(lastPersistedProjectId.current);
+      if (result === "live") {
+        // follow-up 恢复：项目行已存在，按 version_no 轮询；
+        // 首轮恢复：项目行未创建，按 created_at 轮询新项目
+        if (lastPersistedProjectId.current) {
+          startResumePolling(lastPersistedProjectId.current);
+        } else {
+          startNewProjectPolling(restoredGateCreatedAt.current);
+        }
         return;
       }
-      if (result !== "live") {
+      if (result === "expired") {
         updateVersion(id, (v) => ({
           ...v,
           status: "failed",
-          note: approved
-            ? "原生成已随服务重启终止，请基于当前版本重新发起修改"
-            : "已记录你的拒绝；原生成已随服务重启终止",
+          note: "确认门已超时过期（30 分钟未操作），请重新发起",
         }));
+        return;
       }
+      if (result === "failed") {
+        // 网络异常：决策可能未被记录，恢复待确认态允许重试
+        updateVersion(id, (v) => ({
+          ...v,
+          status: "awaiting",
+          note: "网络异常，你的选择可能未被记录，请重试",
+        }));
+        setAwaitingApproval(true);
+        return;
+      }
+      // recorded：DB 已记决策但无存活流水线（服务重启/多实例）
+      updateVersion(id, (v) => ({
+        ...v,
+        status: "failed",
+        note: approved
+          ? "原生成已随服务重启终止，请基于当前版本重新发起修改"
+          : "已记录你的拒绝；原生成已随服务重启终止",
+      }));
     },
-    [startResumePolling, updateVersion],
+    [startResumePolling, startNewProjectPolling, updateVersion],
   );
 
   const approve = useCallback(() => {
@@ -869,6 +981,7 @@ export function useWorkspace() {
     sendFollowUp,
     openProject,
     openScenario,
+    restorePendingGate,
     selectVersion: setSelectedVersionId,
     approve,
     reject,

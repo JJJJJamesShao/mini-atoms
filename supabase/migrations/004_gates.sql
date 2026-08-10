@@ -16,7 +16,7 @@ create table if not exists public.gates (
   expires_at timestamptz not null default (now() + interval '30 minutes')
 );
 
-create index if not exists gates_session_idx on public.gates (session_id);
+-- session_id 的 unique 约束已自带索引，无需重复建索引
 create index if not exists gates_user_idx on public.gates (user_id, status);
 
 -- 与 projects/versions 等既有表一致：启用 RLS 但不建 policy，

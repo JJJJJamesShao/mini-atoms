@@ -164,9 +164,15 @@ export async function POST(req: NextRequest) {
         });
       };
 
-      // 全局订阅：所有 Agent 事件实时推送到前端 + 聚合为过程数据
+      // 全局订阅：所有 Agent 事件实时推送到前端 + 聚合为过程数据。
+      // send 必须包 try/catch：页面刷新后 SSE 流已取消，裸 send 抛错会被 bus
+      // 捕获并跳过本处理器后续的聚合逻辑，导致续跑运行的过程数据全部丢失。
       bus.subscribeAll((event) => {
-        send({ type: "agent_event", payload: event });
+        try {
+          send({ type: "agent_event", payload: event });
+        } catch {
+          // 断流：推送丢失可接受，聚合必须继续
+        }
 
         const stage = event.agent;
         switch (event.type) {
@@ -455,10 +461,14 @@ export async function POST(req: NextRequest) {
             console.error("[Pipeline] 异常路径落库失败:", persistErr);
           }
         }
-        send({
-          type: "error",
-          message: errorMsg,
-        });
+        try {
+          send({
+            type: "error",
+            message: errorMsg,
+          });
+        } catch {
+          // 流已断开：错误通知丢失可接受，落库已在上面完成
+        }
       } finally {
         clearInterval(heartbeatTimer);
         controller.close();

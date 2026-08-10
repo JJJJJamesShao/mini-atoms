@@ -99,9 +99,9 @@ export async function resolveApproval(
       approved ? "approved" : "rejected",
     );
   } catch (err) {
-    // DB 不可用时不阻塞内存路径（ gates 表未建等场景）
+    // DB 不可用时不阻塞内存路径（gates 表未建等场景），但归属仍须校验
     console.error("[Gate] 更新挂起门失败:", err);
-    updated = store.has(sessionId);
+    updated = store.get(sessionId)?.userId === userId;
   }
   if (!updated) return "not_found";
 

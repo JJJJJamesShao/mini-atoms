@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import HomeHero from "./components/HomeHero";
 import PreviewFrame from "./components/PreviewFrame";
 import ProjectWorkspace from "./components/ProjectWorkspace";
@@ -20,10 +20,22 @@ export default function Home() {
     sendFollowUp,
     openProject,
     openScenario,
+    restorePendingGate,
     selectVersion,
     approve,
     reject,
   } = useWorkspace();
+
+  // 挂载时全局恢复挂起门：首轮生成的门 project_id 为 null，
+  // openProject 的项目内查询覆盖不到，需要首页的无 projectId 查询兜底
+  const restoreTried = useRef(false);
+  useEffect(() => {
+    if (restoreTried.current) return;
+    restoreTried.current = true;
+    void restorePendingGate().then((restored) => {
+      if (restored) setView("workspace");
+    });
+  }, [restorePendingGate]);
 
   const handleHeroSubmit = (text: string): boolean => {
     const ok = startProject(text);

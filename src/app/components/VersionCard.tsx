@@ -96,6 +96,14 @@ export default function VersionCard({
         </span>
       </button>
 
+      {/* 运行中：显示实时代码摘要（异步摘要器推送，覆盖式更新） */}
+      {version.status === "running" && version.note && (
+        <div className="flex items-center gap-1.5 px-4 pb-2 text-xs text-blue-600 dark:text-blue-400">
+          <span className="animate-pulse">●</span>
+          <span className="truncate">{version.note}</span>
+        </div>
+      )}
+
       {expanded && (
         <div className="border-t border-[#e5e5e5] px-4 py-3 dark:border-neutral-700">
           <PipelineTimeline stages={version.stages} />

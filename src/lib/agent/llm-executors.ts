@@ -280,7 +280,7 @@ export function createLLMExecutors(
         content: JSON.stringify(clarify),
         metadata: { direction: "in" },
       });
-      const messages = buildSpecPrompt(clarify.summary);
+      const messages = buildSpecPrompt({ requirements: [clarify.summary] });
       const config = MODEL_ROUTING.spec;
       console.log("[DEBUG] Spec 请求:", {
         model: config.model,

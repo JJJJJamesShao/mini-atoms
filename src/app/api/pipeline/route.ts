@@ -120,9 +120,26 @@ export async function POST(req: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
+      // 最近一次发送真实数据的时间（心跳以此为基准，只在静默期发）
+      let lastActivity = Date.now();
       const send = (data: unknown) => {
+        lastActivity = Date.now();
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
       };
+
+      // SSE 心跳：Cloudflare(100s)/Nginx(60s)/Vercel Edge(30s) 等中间代理按
+      // "无数据传输"断开长连接，LLM 思考期（clarify/spec 非流式调用、approve 挂起）
+      // 必须主动保活。15s 一跳，仅在静默期发送，避免冗余流量。
+      const HEARTBEAT_INTERVAL = 15000;
+      const heartbeatTimer = setInterval(() => {
+        if (Date.now() - lastActivity >= HEARTBEAT_INTERVAL) {
+          try {
+            send({ type: "heartbeat", timestamp: Date.now() });
+          } catch {
+            // 流已关闭，定时器随即在 finally 清理
+          }
+        }
+      }, HEARTBEAT_INTERVAL);
 
       // 创建独立的 Agent 事件总线
       const bus = new AgentEventBus();
@@ -381,6 +398,7 @@ export async function POST(req: NextRequest) {
           message: errorMsg,
         });
       } finally {
+        clearInterval(heartbeatTimer);
         controller.close();
       }
     },

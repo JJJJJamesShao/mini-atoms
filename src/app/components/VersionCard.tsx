@@ -1,8 +1,19 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { Version } from "../hooks/useWorkspace";
 import PipelineTimeline from "./PipelineTimeline";
 import SpecCard from "./SpecCard";
+
+/** 运行耗时：每秒自增，仅在 running 状态挂载（卸载即清理定时器） */
+function RunningElapsed() {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <span>AI 正在思考中…（已运行 {elapsed}s）</span>;
+}
 
 const STATUS_PILLS: Record<
   Version["status"],
@@ -109,11 +120,23 @@ export default function VersionCard({
         </span>
       </button>
 
-      {/* 运行中：显示实时代码摘要（异步摘要器推送，覆盖式更新） */}
-      {version.status === "running" && version.note && (
+      {/* 运行中：显示实时代码摘要（异步摘要器推送，覆盖式更新）+ 已耗时 */}
+      {version.status === "running" && (
         <div className="flex items-center gap-1.5 px-4 pb-2 text-xs text-blue-600 dark:text-blue-400">
           <span className="animate-pulse">●</span>
-          <span className="truncate">{version.note}</span>
+          <RunningElapsed />
+          {version.note && (
+            <span className="truncate text-neutral-400 dark:text-neutral-500">
+              · {version.note}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* 断流失败：常驻提示（note 只在展开时可见，断流需要一眼看到） */}
+      {version.status === "failed" && version.note?.includes("连接已断开") && (
+        <div className="px-4 pb-2 text-xs text-red-600 dark:text-red-400">
+          连接已断开，请重试或刷新页面
         </div>
       )}
 

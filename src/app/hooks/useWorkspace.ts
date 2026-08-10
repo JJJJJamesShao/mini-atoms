@@ -200,6 +200,11 @@ export function useWorkspace() {
         setExecutionLogs((prev) => [...prev, entry]);
       };
 
+      /** SSE 断流检测：最近一次收到任何数据的时间（含 heartbeat） */
+      let lastHeartbeat = Date.now();
+      /** 断流巡检定时器（finally 中清理） */
+      let heartbeatChecker: ReturnType<typeof setInterval> | null = null;
+
       const handleEvent = (event: Record<string, unknown>) => {
         const type = event.type as string;
 
@@ -431,6 +436,21 @@ export function useWorkspace() {
         const reader = response.body?.getReader();
         if (!reader) throw new Error("响应体为空");
 
+        // 断流巡检：45s 无任何数据（含心跳）判定连接已死——收敛终态并取消读取，
+        // 否则版本会永远停在 running（中间代理断连后 read() 可能悬挂）。
+        // 取值依据：服务端心跳 15s 一跳且"静默≥15s 才发"，真实数据恰好落在某次
+        // tick 之后时首个心跳要等两个 tick，最坏数据间隙≈30s+定时器滞后；
+        // 45s（3× 间隔）留出足够容差，避免把健康连接误判为断流。
+        const HEARTBEAT_TIMEOUT = 45000;
+        heartbeatChecker = setInterval(() => {
+          if (Date.now() - lastHeartbeat > HEARTBEAT_TIMEOUT) {
+            if (heartbeatChecker) clearInterval(heartbeatChecker);
+            console.warn("[Workspace] SSE 心跳超时，连接可能已断开");
+            failVersion("连接已断开，请重试");
+            void reader.cancel().catch(() => {});
+          }
+        }, 5000);
+
         const decoder = new TextDecoder();
         let buffer = "";
 
@@ -445,6 +465,7 @@ export function useWorkspace() {
           for (const line of lines) {
             const trimmed = line.trim();
             if (!trimmed.startsWith("data: ")) continue;
+            lastHeartbeat = Date.now(); // 任何数据（含心跳）都视为存活信号
             try {
               handleEvent(JSON.parse(trimmed.slice(6)));
             } catch {
@@ -457,6 +478,7 @@ export function useWorkspace() {
           err instanceof Error ? err.message : `请求出错：${String(err)}`,
         );
       } finally {
+        if (heartbeatChecker) clearInterval(heartbeatChecker);
         setRunning(false);
         setAwaitingApproval(false);
         activeVersionId.current = null;

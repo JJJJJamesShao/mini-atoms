@@ -225,10 +225,14 @@ export async function POST(req: NextRequest) {
       // 供 catch（异常路径）落库使用的提升声明：正常路径在 try 内赋值
       let sopId = "unknown";
       let displaySteps: string[] = [];
+      // 落库幂等防护：persistRun 之后的 send 在断流时抛错会落入外层 catch，
+      // 若无防护会对同一运行二次落库（重复项目/版本/消息）
+      let persistAttempted = false;
 
       /**
        * 落库一次运行（done/fail/error 三路径共用）。成功与失败都写版本行——
        * 失败过程对客户同样有信任价值。返回最终项目 id（落库失败时由调用方捕获）。
+       * 内部的 send 仅作通知，断流不影响落库结果，一律 try/catch 吞掉。
        */
       const persistRun = async (opts: {
         stages: StageState[];
@@ -237,6 +241,14 @@ export async function POST(req: NextRequest) {
         files: File[];
         assistantText: string;
       }): Promise<string | null> => {
+        persistAttempted = true;
+        const notify = (data: unknown) => {
+          try {
+            send(data);
+          } catch {
+            // 流已关闭：通知丢失可接受，落库已完成
+          }
+        };
         const process: ProcessData = {
           request: input,
           notes: opts.notes,
@@ -256,7 +268,7 @@ export async function POST(req: NextRequest) {
           await createVersion(projectId, opts.files, nextVersionNo, process);
           await createMessage(projectId, "user", input);
           await createMessage(projectId, "assistant", opts.assistantText);
-          send({
+          notify({
             type: "project_updated",
             projectId,
             versionNo: nextVersionNo,
@@ -268,7 +280,11 @@ export async function POST(req: NextRequest) {
         await createVersion(project.id, opts.files, 1, process);
         await createMessage(project.id, "user", input);
         await createMessage(project.id, "assistant", opts.assistantText);
-        send({ type: "project_created", projectId: project.id, versionNo: 1 });
+        notify({
+          type: "project_created",
+          projectId: project.id,
+          versionNo: 1,
+        });
         return project.id;
       };
 
@@ -410,26 +426,30 @@ export async function POST(req: NextRequest) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         console.error("[Pipeline Error]", errorMsg, err);
         // 异常终止同样落库（与 done/fail 路径对齐）：出错节点标 failed，
-        // 未触达的保持 pending，过程日志完整保留，刷新后可回放事故现场
-        try {
-          const stages: StageState[] = displaySteps.map((name) => {
-            const s = stageStates.get(name);
-            if (!s) return { stage: name, status: "pending" };
-            if (s.status === "active" || s.status === "pending") {
-              return { ...s, status: "failed" };
-            }
-            return s;
-          });
-          await persistRun({
-            stages,
-            notes: `执行出错：${errorMsg}`,
-            questions: null,
-            // 异常中断没有新产物：保留所基于的代码
-            files: currentFiles ?? [],
-            assistantText: `执行出错：${errorMsg}`,
-          });
-        } catch (persistErr) {
-          console.error("[Pipeline] 异常路径落库失败:", persistErr);
+        // 未触达的保持 pending，过程日志完整保留，刷新后可回放事故现场。
+        // 幂等防护：正常路径已尝试落库（persistAttempted）时跳过，防止
+        // persistRun 之后的 send 抛错导致同一运行二次落库。
+        if (!persistAttempted) {
+          try {
+            const stages: StageState[] = displaySteps.map((name) => {
+              const s = stageStates.get(name);
+              if (!s) return { stage: name, status: "pending" };
+              if (s.status === "active" || s.status === "pending") {
+                return { ...s, status: "failed" };
+              }
+              return s;
+            });
+            await persistRun({
+              stages,
+              notes: `执行出错：${errorMsg}`,
+              questions: null,
+              // 异常中断没有新产物：保留所基于的代码
+              files: currentFiles ?? [],
+              assistantText: `执行出错：${errorMsg}`,
+            });
+          } catch (persistErr) {
+            console.error("[Pipeline] 异常路径落库失败:", persistErr);
+          }
         }
         send({
           type: "error",

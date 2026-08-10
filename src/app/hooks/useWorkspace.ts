@@ -24,7 +24,13 @@ export interface StageItem {
   detail?: string;
 }
 
-export type VersionStatus = "running" | "awaiting" | "done" | "failed";
+export type VersionStatus =
+  | "running"
+  | "awaiting"
+  | "done"
+  | "failed"
+  /** 澄清不足软着陆：流程暂停等待用户补充信息，不是失败 */
+  | "need_input";
 
 export interface Version {
   id: number;
@@ -38,6 +44,8 @@ export interface Version {
   status: VersionStatus;
   stages: StageItem[];
   spec: SpecOutput | null;
+  /** need_input 状态下，模型希望用户补充的问题清单 */
+  questions?: string[] | null;
   /** 结果说明（成功产物 notes / 失败原因） */
   note: string | null;
   html: string | null;
@@ -64,13 +72,13 @@ export interface Project {
 const initialStages = (): StageItem[] =>
   STAGE_ORDER.map((stage) => ({ stage, status: "pending" as const }));
 
-/** 失败原因 → 用户可读文案 */
+/** 失败原因 → 用户可读文案（与服务端 pipeline route 保持一致） */
 function failReasonText(reason: string | null): string {
   switch (reason) {
     case "spec_rejected":
       return "规格被拒绝，请重新描述需求。";
     case "need_clarification":
-      return "需求信息不足，请补充更多细节后重试。";
+      return "还需要你补充几点信息，流程已暂停等待你（见问题清单）。";
     default:
       return "生成校验多次未通过，请换个描述重试。";
   }
@@ -362,9 +370,23 @@ export function useWorkspace() {
               note: result.notes,
             }));
           } else {
-            const reason = failReasonText(event.reason as string | null);
-            finalizeStages("failed", reason);
-            failVersion(reason);
+            const reason = event.reason as string | null;
+            if (reason === "need_clarification") {
+              // 软着陆：澄清不足不是失败——版本标记 need_input，阶段保持
+              // 已执行状态（clarify 为 done、其余 pending），附问题清单引导补充
+              const questions =
+                (event.questions as string[] | null | undefined) ?? null;
+              updateVersion(id, (v) => ({
+                ...v,
+                status: "need_input",
+                questions,
+                note: failReasonText(reason),
+              }));
+            } else {
+              const text = failReasonText(reason);
+              finalizeStages("failed", text);
+              failVersion(text);
+            }
           }
         } else if (type === "persist_error") {
           updateVersion(id, (v) => ({
@@ -463,8 +485,14 @@ export function useWorkspace() {
         (v) => v.id === selectedVersionId,
       );
       const currentHtml = currentVersion?.html ?? undefined;
+      // 软着陆续跑：选中版本在等待补充信息时，把原始需求与补充说明合并提交，
+      // 让 clarify 看到完整上下文（否则模型只拿到半截回答）
+      const effectiveRequest =
+        currentVersion?.status === "need_input"
+          ? `${currentVersion.request}\n\n补充说明：\n${request}`
+          : request;
       void runVersion(
-        request,
+        effectiveRequest,
         false,
         currentHtml,
         currentVersion?.versionNo ?? undefined,
@@ -500,6 +528,7 @@ export function useWorkspace() {
               }[]
             | null;
           parent_version_no: number | null;
+          questions: string[] | null;
         }
 
         const stored: StoredVersion[] = data.versions ?? [];
@@ -524,6 +553,10 @@ export function useWorkspace() {
                 status: "done" as const,
               }));
           const failed = stages.some((s) => s.status === "failed");
+          // 无失败但有未执行阶段 → 流程中途暂停等待用户补充（need_input 软着陆）
+          const interrupted = stages.some(
+            (s) => s.status === "pending" || s.status === "active",
+          );
           const request = v.request ?? data.project.title;
           const title =
             request.length > 30 ? `${request.slice(0, 30)}…` : request;
@@ -534,9 +567,10 @@ export function useWorkspace() {
             parentVersionNo: v.parent_version_no,
             request,
             scenarioTitle: title,
-            status: failed ? "failed" : "done",
+            status: failed ? "failed" : interrupted ? "need_input" : "done",
             stages,
             spec: v.spec,
+            questions: v.questions,
             note: v.notes,
             html,
           });

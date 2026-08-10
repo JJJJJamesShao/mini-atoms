@@ -35,7 +35,7 @@ function failReasonText(reason: string | null): string {
     case "spec_rejected":
       return "规格被拒绝，请重新描述需求。";
     case "need_clarification":
-      return "需求信息不足，请补充更多细节后重试。";
+      return "还需要你补充几点信息，流程已暂停等待你（见问题清单）。";
     default:
       return "生成校验多次未通过，请换个描述重试。";
   }
@@ -253,7 +253,7 @@ export async function POST(req: NextRequest) {
         // 对话迭代：传入当前代码，让 LLM 基于现有代码修改
         const initialFiles: File[] | undefined = currentFiles;
 
-        const { finalState, reason, result } = await runSOP(
+        const { finalState, reason, result, questions } = await runSOP(
           input,
           sop,
           executors,
@@ -267,11 +267,18 @@ export async function POST(req: NextRequest) {
         let finalProjectId: string | null = null;
         if (finalState === "done" || finalState === "fail") {
           try {
+            // 软着陆：澄清不足（need_clarification）不是失败——未执行的阶段保持
+            // pending，只停在已执行的位置，等用户补充信息后继续（认知严重度一致）
+            const isNeedInput =
+              finalState === "fail" && reason === "need_clarification";
             // 阶段卡片终态：未触达/未收尾的阶段跟随流水线终态（与前端 finalizeStages 一致）
             const finalStageStatus =
               finalState === "done" ? ("done" as const) : ("failed" as const);
             const stages: StageState[] = displaySteps.map((name) => {
               const s = stageStates.get(name);
+              if (isNeedInput) {
+                return s ?? { stage: name, status: "pending" };
+              }
               if (!s || s.status === "active" || s.status === "pending") {
                 return {
                   stage: name,
@@ -291,6 +298,7 @@ export async function POST(req: NextRequest) {
               stages,
               logs: processLogs,
               parentVersionNo: null, // 下方按项目实际情况填充
+              questions: questions ?? null,
             };
             // 失败运行没有新产物：保留所基于的代码（首轮失败则为空文件列表）
             const files = result?.files ?? currentFiles ?? [];
@@ -340,6 +348,7 @@ export async function POST(req: NextRequest) {
           type: "done",
           finalState,
           reason,
+          questions: questions ?? null,
           projectId: finalProjectId,
           result: result
             ? {

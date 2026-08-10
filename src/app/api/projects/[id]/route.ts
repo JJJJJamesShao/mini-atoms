@@ -41,10 +41,19 @@ export async function GET(
 
     return json({
       project,
+      // 全量返回（含各版本 files 与过程数据），供前端刷新后完整回放 workflow
       versions: versions.map((v) => ({
         id: v.id,
         version_no: v.version_no,
         created_at: v.created_at,
+        files: v.files,
+        request: v.request,
+        notes: v.notes,
+        spec: v.spec,
+        sop_id: v.sop_id,
+        stages: v.stages,
+        logs: v.logs,
+        parent_version_no: v.parent_version_no,
       })),
       latestHtml: html,
     });

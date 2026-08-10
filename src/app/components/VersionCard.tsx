@@ -77,6 +77,14 @@ export default function VersionCard({
         className="flex w-full items-center gap-2 px-4 py-3 text-left"
       >
         <span className="text-sm font-semibold">版本 {no}</span>
+        {version.parentVersionNo != null && (
+          <span
+            className="shrink-0 rounded-full bg-neutral-100 px-1.5 py-0.5 text-[10px] text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400"
+            title={`本版本基于版本 ${version.parentVersionNo} 的代码修改`}
+          >
+            基于 v{version.parentVersionNo}
+          </span>
+        )}
         <span className="truncate text-sm text-[#525252] dark:text-neutral-400">
           {version.scenarioTitle}
         </span>

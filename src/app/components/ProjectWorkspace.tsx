@@ -43,6 +43,10 @@ export default function ProjectWorkspace({
     setDraft("");
   };
 
+  // 追问基准：当前选中版本（分叉修改时用户必须清楚自己在改哪一版）
+  const selectedNo =
+    project.versions.findIndex((v) => v.id === selectedVersionId) + 1;
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div
@@ -77,26 +81,34 @@ export default function ProjectWorkspace({
         ))}
       </div>
 
-      <div className="flex gap-2 border-t border-[#e5e5e5] p-3 dark:border-neutral-700">
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            // 中文输入法组词期间的 Enter 是确认候选词，不应触发发送
-            if (e.key === "Enter" && !e.nativeEvent.isComposing) submit();
-          }}
-          disabled={running}
-          placeholder="输入修改需求，例如：改成深色模式"
-          className="flex-1 rounded-xl border border-[#e5e5e5] bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-neutral-200 disabled:opacity-40 dark:border-neutral-700 dark:focus:ring-neutral-700"
-        />
-        <button
-          type="button"
-          onClick={submit}
-          disabled={running || !draft.trim()}
-          className="rounded-lg bg-neutral-900 px-4 py-2 text-sm text-white transition-colors hover:bg-neutral-700 disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
-        >
-          发送
-        </button>
+      <div className="border-t border-[#e5e5e5] p-3 dark:border-neutral-700">
+        {selectedNo > 0 && (
+          <div className="pb-2 text-xs text-[#a3a3a3]">
+            追问将基于 <span className="font-medium">版本 {selectedNo}</span>{" "}
+            的代码修改
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              // 中文输入法组词期间的 Enter 是确认候选词，不应触发发送
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) submit();
+            }}
+            disabled={running}
+            placeholder="输入修改需求，例如：改成深色模式"
+            className="flex-1 rounded-xl border border-[#e5e5e5] bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-neutral-200 disabled:opacity-40 dark:border-neutral-700 dark:focus:ring-neutral-700"
+          />
+          <button
+            type="button"
+            onClick={submit}
+            disabled={running || !draft.trim()}
+            className="rounded-lg bg-neutral-900 px-4 py-2 text-sm text-white transition-colors hover:bg-neutral-700 disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
+          >
+            发送
+          </button>
+        </div>
       </div>
     </div>
   );

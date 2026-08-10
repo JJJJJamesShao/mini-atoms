@@ -345,6 +345,10 @@ export function useWorkspace() {
         if (currentHtml) {
           payload.currentFiles = [{ path: "index.html", content: currentHtml }];
         }
+        // 如果有持久化的项目 ID，传递 projectId 让后端追加版本
+        if (lastPersistedProjectId.current) {
+          payload.projectId = lastPersistedProjectId.current;
+        }
 
         const response = await fetch("/api/pipeline", {
           method: "POST",

@@ -82,17 +82,26 @@ export default function PreviewFrame({ preview }: PreviewFrameProps) {
         >
           ⟳ 刷新
         </button>
-        {["分享", "发布", "控制台"].map((label) => (
-          <button
-            key={label}
-            type="button"
-            disabled
-            title="演示模式暂未开放"
-            className="rounded-lg border border-[#e5e5e5] px-2 py-1 text-xs opacity-40 dark:border-neutral-700"
-          >
-            {label}
-          </button>
-        ))}
+        <button
+          type="button"
+          disabled={!preview}
+          onClick={() => {
+            if (!preview?.html) return;
+            const blob = new Blob([preview.html], { type: "text/html" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `${preview.title}.html`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }}
+          title="下载 HTML 文件"
+          className="rounded-lg border border-[#e5e5e5] px-2 py-1 text-xs transition-colors hover:bg-neutral-100 disabled:opacity-40 dark:border-neutral-700 dark:hover:bg-neutral-800"
+        >
+          ⬇️ 下载
+        </button>
       </div>
 
       <div className="relative min-h-0 flex-1 bg-white">

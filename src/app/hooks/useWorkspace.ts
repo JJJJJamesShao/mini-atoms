@@ -37,6 +37,10 @@ export interface Version {
   /** 结果说明（成功产物 notes / 失败原因） */
   note: string | null;
   html: string | null;
+  quality?: {
+    score: number;
+    checks: Array<{ name: string; passed: boolean }>;
+  };
 }
 
 export interface ExecutionLog {

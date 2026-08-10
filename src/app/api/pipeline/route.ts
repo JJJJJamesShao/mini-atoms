@@ -222,9 +222,60 @@ export async function POST(req: NextRequest) {
         }
       });
 
+      // 供 catch（异常路径）落库使用的提升声明：正常路径在 try 内赋值
+      let sopId = "unknown";
+      let displaySteps: string[] = [];
+
+      /**
+       * 落库一次运行（done/fail/error 三路径共用）。成功与失败都写版本行——
+       * 失败过程对客户同样有信任价值。返回最终项目 id（落库失败时由调用方捕获）。
+       */
+      const persistRun = async (opts: {
+        stages: StageState[];
+        notes: string | null;
+        questions: string[] | null;
+        files: File[];
+        assistantText: string;
+      }): Promise<string | null> => {
+        const process: ProcessData = {
+          request: input,
+          notes: opts.notes,
+          spec: capturedSpec,
+          sopId,
+          stages: opts.stages,
+          logs: processLogs,
+          parentVersionNo: null, // 下方按项目实际情况填充
+          questions: opts.questions,
+        };
+        if (projectId) {
+          // 对话迭代：追加版本到现有项目
+          const versions = await getVersions(projectId);
+          const nextVersionNo = versions.length + 1;
+          process.parentVersionNo =
+            baseVersionNo ?? versions[versions.length - 1]?.version_no ?? null;
+          await createVersion(projectId, opts.files, nextVersionNo, process);
+          await createMessage(projectId, "user", input);
+          await createMessage(projectId, "assistant", opts.assistantText);
+          send({
+            type: "project_updated",
+            projectId,
+            versionNo: nextVersionNo,
+          });
+          return projectId;
+        }
+        // 首次生成：创建新项目
+        const project = await createProject(input, user.id);
+        await createVersion(project.id, opts.files, 1, process);
+        await createMessage(project.id, "user", input);
+        await createMessage(project.id, "assistant", opts.assistantText);
+        send({ type: "project_created", projectId: project.id, versionNo: 1 });
+        return project.id;
+      };
+
       try {
         // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）
         const sop = selectSOP(input);
+        sopId = sop.id;
 
         // 本次运行的角色实例（记忆隔离）+ 共享 Memory 的 LLM 执行器；
         // 游戏 SOP 强制结构化 JSON 输出（CodeArtifact）
@@ -249,7 +300,7 @@ export async function POST(req: NextRequest) {
         };
 
         // 前端按 sop.steps 动态生成阶段卡片（fix 为内部步骤，不下发）
-        const displaySteps = sop.steps
+        displaySteps = sop.steps
           .map((s) => s.name)
           .filter((n) =>
             [
@@ -307,51 +358,16 @@ export async function POST(req: NextRequest) {
             });
             const notes =
               result?.notes ?? (reason ? failReasonText(reason) : null);
-            const process: ProcessData = {
-              request: input,
-              notes,
-              spec: capturedSpec,
-              sopId: sop.id,
-              stages,
-              logs: processLogs,
-              parentVersionNo: null, // 下方按项目实际情况填充
-              questions: questions ?? null,
-            };
             // 失败运行没有新产物：保留所基于的代码（首轮失败则为空文件列表）
             const files = result?.files ?? currentFiles ?? [];
-            const assistantText =
-              notes ?? (finalState === "done" ? "生成完成" : "生成失败");
-
-            if (projectId) {
-              // 对话迭代：追加版本到现有项目
-              const versions = await getVersions(projectId);
-              const nextVersionNo = versions.length + 1;
-              process.parentVersionNo =
-                baseVersionNo ??
-                versions[versions.length - 1]?.version_no ??
-                null;
-              await createVersion(projectId, files, nextVersionNo, process);
-              await createMessage(projectId, "user", input);
-              await createMessage(projectId, "assistant", assistantText);
-              finalProjectId = projectId;
-              send({
-                type: "project_updated",
-                projectId,
-                versionNo: nextVersionNo,
-              });
-            } else {
-              // 首次生成：创建新项目
-              const project = await createProject(input, user.id);
-              await createVersion(project.id, files, 1, process);
-              await createMessage(project.id, "user", input);
-              await createMessage(project.id, "assistant", assistantText);
-              finalProjectId = project.id;
-              send({
-                type: "project_created",
-                projectId: finalProjectId,
-                versionNo: 1,
-              });
-            }
+            finalProjectId = await persistRun({
+              stages,
+              notes,
+              questions: questions ?? null,
+              files,
+              assistantText:
+                notes ?? (finalState === "done" ? "生成完成" : "生成失败"),
+            });
           } catch (dbErr) {
             send({
               type: "persist_error",
@@ -393,6 +409,28 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         console.error("[Pipeline Error]", errorMsg, err);
+        // 异常终止同样落库（与 done/fail 路径对齐）：出错节点标 failed，
+        // 未触达的保持 pending，过程日志完整保留，刷新后可回放事故现场
+        try {
+          const stages: StageState[] = displaySteps.map((name) => {
+            const s = stageStates.get(name);
+            if (!s) return { stage: name, status: "pending" };
+            if (s.status === "active" || s.status === "pending") {
+              return { ...s, status: "failed" };
+            }
+            return s;
+          });
+          await persistRun({
+            stages,
+            notes: `执行出错：${errorMsg}`,
+            questions: null,
+            // 异常中断没有新产物：保留所基于的代码
+            files: currentFiles ?? [],
+            assistantText: `执行出错：${errorMsg}`,
+          });
+        } catch (persistErr) {
+          console.error("[Pipeline] 异常路径落库失败:", persistErr);
+        }
         send({
           type: "error",
           message: errorMsg,

@@ -281,8 +281,11 @@ export function createLLMExecutors(
         metadata: { direction: "in" },
       });
       // 新版 clarify 输出含结构化 requirements；旧输出回退到 summary 包装
+      // constraints/assumptions 一并透传，架构师方案需尊重澄清阶段的约束
       const messages = buildSpecPrompt({
         requirements: clarify.requirements ?? [clarify.summary],
+        constraints: clarify.constraints,
+        assumptions: clarify.assumptions,
       });
       const config = MODEL_ROUTING.spec;
       console.log("[DEBUG] Spec 请求:", {

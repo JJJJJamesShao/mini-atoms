@@ -67,7 +67,8 @@ status 判定：需求明确（如"做一个待办清单"）直接 ready；只�
 1. 不要输出任何解释文字，只输出 JSON
 2. 不要包裹 markdown 代码块，直接输出 JSON
 3. requirements 必须具体可测试：不说"好看"，说"深色主题，背景色 #1a1a2e"
-4. 如果用户输入极其模糊（如"做一个好玩的"），输出最大众化的假设`;
+4. 如果用户输入极其模糊（如"做一个好玩的"），输出最大众化的假设
+5. openQuestions 不阻塞流程：有疑问先记入 assumptions 按最合理假设继续，只把真正影响实现方向的问题列入 openQuestions`;
 
 const SYSTEM_SPEC = `你是一位前端架构师，负责将产品需求转化为技术实现方案。
 
@@ -164,7 +165,8 @@ const SYSTEM_SPEC = `你是一位前端架构师，负责将产品需求转化�
 2. 不要包裹 markdown 代码块，直接输出 JSON
 3. 技术方案必须匹配复杂度：简单任务不要过度设计
 4. 明确数据结构：数组？对象？需要哪些字段？
-5. 识别简化点：如果需求中有难以实现的功能，提出简化方案`;
+5. 识别简化点：如果需求中有难以实现的功能，提出简化方案
+6. constraints 必须包含"单文件 HTML（内联 CSS 和 JS）"和"无外部依赖（不使用 CDN、外部脚本或样式）"——下游校验层会硬性检查这两条，缺失会导致生成物被打回`;
 
 const SYSTEM_GENERATE = `你是一位资深前端工程师，负责根据技术规格生成高质量、可直接运行的 HTML 代码。
 
@@ -177,14 +179,16 @@ const SYSTEM_GENERATE = `你是一位资深前端工程师，负责根据技术�
 
 ## 输出格式
 
-直接输出完整的 HTML 代码：
+直接输出完整的 HTML 代码，必须以 <!DOCTYPE html> 开头。代码中必须按顺序插入以下 4 个分段标记（HTML 注释），供流式进度解析，不得遗漏：
 
 <!DOCTYPE html>
+<!-- SECTION: HEAD -->
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>标题</title>
+  <!-- SECTION: CSS -->
   <style>
     /* 所有 CSS 内联 */
     :root {
@@ -200,10 +204,12 @@ const SYSTEM_GENERATE = `你是一位资深前端工程师，负责根据技术�
     }
   </style>
 </head>
+<!-- SECTION: BODY -->
 <body>
   <!-- HTML 结构 -->
   <div id="app"></div>
   
+  <!-- SECTION: JS -->
   <script>
     // 所有 JS 内联
     // 状态集中管理
@@ -242,7 +248,9 @@ const SYSTEM_GENERATE = `你是一位资深前端工程师，负责根据技术�
 3. 完整可运行：代码必须能直接在浏览器中打开运行
 4. 响应式设计：适配桌面和移动端
 5. 错误处理：防止常见错误（null 引用、数组越界）
-6. 性能优化：使用 requestAnimationFrame、避免内存泄漏`;
+6. 性能优化：使用 requestAnimationFrame、避免内存泄漏
+7. 输出必须以 <!DOCTYPE html> 开头，总大小控制在 200KB 以内
+8. 必须包含全部 4 个分段标记（<!-- SECTION: HEAD/CSS/BODY/JS -->），按上述位置放置`;
 
 // 注意：完整重写修复路径专用。Search/Replace 增量修复走 SYSTEM_PATCH + buildPatchPrompt，
 // 两者输出格式不同，不可混用（此前混用会导致 fix 路径产出 Patch 文本而非完整 HTML）。
@@ -353,13 +361,21 @@ export function buildClarifyPrompt(input: string) {
 
 // --- spec 节点 ---
 
-export function buildSpecPrompt(clarify: { requirements: string[] }) {
+export function buildSpecPrompt(clarify: {
+  requirements: string[];
+  constraints?: string[];
+  assumptions?: string[];
+}) {
+  let content = "需求：\n- " + clarify.requirements.join("\n- ");
+  if (clarify.constraints && clarify.constraints.length > 0) {
+    content += "\n\n约束：\n- " + clarify.constraints.join("\n- ");
+  }
+  if (clarify.assumptions && clarify.assumptions.length > 0) {
+    content += "\n\n已确认的假设：\n- " + clarify.assumptions.join("\n- ");
+  }
   return [
     { role: "system" as const, content: SYSTEM_SPEC },
-    {
-      role: "user" as const,
-      content: "需求：\n- " + clarify.requirements.join("\n- "),
-    },
+    { role: "user" as const, content },
   ];
 }
 

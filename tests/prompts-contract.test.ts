@@ -65,6 +65,34 @@ describe("prompt 输出契约", () => {
     expect(messages[1].content).toContain("单文件计算器");
   });
 
+  it("clarify→spec 交接：constraints 与 assumptions 透传进 spec prompt", () => {
+    const messages = buildSpecPrompt({
+      requirements: ["需求A"],
+      constraints: ["单文件 HTML"],
+      assumptions: ["默认深色主题"],
+    });
+    expect(messages[1].content).toContain("单文件 HTML");
+    expect(messages[1].content).toContain("默认深色主题");
+  });
+
+  it("SYSTEM_SPEC 必须强制单文件/无外部依赖约束（verify 层硬性检查，防白烧 fix 轮次）", () => {
+    const system = buildSpecPrompt({ requirements: ["r1"] })[0].content;
+    expect(system).toContain("单文件 HTML");
+    expect(system).toContain("无外部依赖");
+  });
+
+  it("SYSTEM_GENERATE 必须包含 4 个 SECTION 分段标记（流式子步骤进度解析依赖）", () => {
+    const system = buildGeneratePrompt(SPEC)[0].content;
+    for (const marker of [
+      "SECTION: HEAD",
+      "SECTION: CSS",
+      "SECTION: BODY",
+      "SECTION: JS",
+    ]) {
+      expect(system).toContain(`<!-- ${marker} -->`);
+    }
+  });
+
   it("完整重写修复路径：不得混入 Search/Replace 格式，要求输出完整 HTML", () => {
     const messages = buildGeneratePrompt(SPEC, ERRORS);
     const all = messages.map((m) => m.content).join("\n");

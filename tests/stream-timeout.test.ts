@@ -6,7 +6,11 @@
 
 import { describe, expect, it } from "vitest";
 import type OpenAI from "openai";
-import { collectStreamText, StreamTimeoutError } from "../src/lib/llm/stream";
+import {
+  collectStreamText,
+  StreamTimeoutError,
+  throttleByChars,
+} from "../src/lib/llm/stream";
 
 type Chunk = OpenAI.Chat.ChatCompletionChunk;
 type FakeStream = AsyncIterable<Chunk> & { controller?: AbortController };
@@ -98,5 +102,35 @@ describe("collectStreamText 超时保护", () => {
       totalTimeoutMs: 5000,
     });
     expect(content).toBe("");
+  });
+});
+
+describe("throttleByChars 字符增量节流", () => {
+  it("每新累积 intervalChars 才触发一次，携带累计文本", () => {
+    const seen: string[] = [];
+    const throttled = throttleByChars(10, (acc) => seen.push(acc));
+
+    throttled("abcde", "abcde"); // 5 < 10，不触发
+    throttled("abcdefghij", "fghij"); // 达到 10，触发
+    throttled("abcdefghijk", "k"); // 11-10=1 < 10，不触发
+    throttled("abcdefghijklmnopqrst", "lmnopqrst"); // 达到 20，触发
+
+    expect(seen).toEqual(["abcdefghij", "abcdefghijklmnopqrst"]);
+  });
+
+  it("单次增量跨越多倍间隔也只触发一次（以最新累计为准）", () => {
+    const seen: string[] = [];
+    const throttled = throttleByChars(5, (acc) => seen.push(acc));
+
+    throttled("x".repeat(12), "x".repeat(12)); // 一次跨越 2 个间隔
+    expect(seen).toEqual(["x".repeat(12)]);
+  });
+
+  it("从零开始计数，首个 chunk 不足间隔不触发", () => {
+    const seen: string[] = [];
+    const throttled = throttleByChars(100, (acc) => seen.push(acc));
+
+    throttled("short", "short");
+    expect(seen).toEqual([]);
   });
 });

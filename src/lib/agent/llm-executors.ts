@@ -1,8 +1,8 @@
 import type { Executors } from "../agent";
 import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
 import type OpenAI from "openai";
-import { chat, streamChat, streamGLM } from "@/lib/llm/client";
-import { collectStreamText } from "@/lib/llm/stream";
+import { streamChat, streamGLM } from "@/lib/llm/client";
+import { collectStreamText, throttleByChars } from "@/lib/llm/stream";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -24,6 +24,75 @@ import { verifyStageCode } from "../verify/stage";
 import type { AgentEvent, AgentEventBus } from "./bus";
 import { AgentMemory } from "./memory";
 import { MessageTopic } from "./message";
+
+/**
+ * 流式超时档位（卡死判定统一只靠 idle；total 仅作失控兜底）：
+ * - GENERATE：generate 系路径——完整重写 2 万+ 字符的大文件属正常时长，
+ *   曾统一 300s 导致 follow-up 回退重写被误杀，故放宽到 600s
+ * - FAST_JSON：clarify/spec 等 KB 级 JSON 输出，120s 足够
+ * - SUMMARY：一句话代码摘要，秒级
+ */
+const GENERATE_STREAM_TIMEOUTS = {
+  idleTimeoutMs: 60_000,
+  totalTimeoutMs: 600_000,
+};
+const FAST_JSON_STREAM_TIMEOUTS = {
+  idleTimeoutMs: 60_000,
+  totalTimeoutMs: 120_000,
+};
+const SUMMARY_STREAM_TIMEOUTS = {
+  idleTimeoutMs: 30_000,
+  totalTimeoutMs: 60_000,
+};
+
+/**
+ * generate 系路径统一流式收集入口：超时档位 + 节流进度事件。
+ * 此前 stage/follow-up/patch 三处逐字复制同一段"每 2000 字符 emit"模板。
+ */
+async function collectGenerateStream(
+  stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  bus: AgentEventBus | undefined,
+  agentName: string,
+  messageFor: (accLength: number) => string,
+): Promise<string> {
+  return collectStreamText(
+    stream,
+    GENERATE_STREAM_TIMEOUTS,
+    throttleByChars(2000, (acc) => {
+      bus?.emit({
+        type: "agent:progress",
+        agent: agentName,
+        role: "前端工程师",
+        message: messageFor(acc.length),
+      });
+    }),
+  );
+}
+
+/**
+ * clarify/spec 统一流式收集入口（KB 级 JSON、快模型）。
+ * 替代非流式 chat()——后者无前端进度反馈，且曾被代理静默挂起。
+ */
+async function collectJsonStream(
+  stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+  bus: AgentEventBus | undefined,
+  agent: string,
+  role: string,
+  progressLabel: string,
+): Promise<string> {
+  return collectStreamText(
+    stream,
+    FAST_JSON_STREAM_TIMEOUTS,
+    throttleByChars(500, (acc) => {
+      bus?.emit({
+        type: "agent:progress",
+        agent,
+        role,
+        message: `${progressLabel}：已接收 ${acc.length} 字符...`,
+      });
+    }),
+  );
+}
 
 /**
  * 异步代码摘要器 — 生成过程中定期把已产出的代码片段发给快模型，
@@ -76,24 +145,28 @@ export class CodeSummarizer {
   }
 }
 
-/** 默认摘要实现：快模型一句话总结代码片段在做什么 */
+/** 默认摘要实现：快模型一句话总结代码片段在做什么（流式 + 短超时） */
 async function defaultSummarize(snippet: string): Promise<string> {
-  const response = await chat(MODEL_ROUTING.clarify, [
-    {
-      role: "system",
-      content:
-        "你是一位代码分析助手。请用一句话（不超过 20 个字）总结这段代码正在实现什么功能。只输出总结，不要解释。",
-    },
-    { role: "user", content: `代码片段：\n${snippet}` },
-  ]);
-  return response.choices[0]?.message?.content?.trim() ?? "";
+  const text = await collectStreamText(
+    await streamChat(MODEL_ROUTING.clarify, [
+      {
+        role: "system",
+        content:
+          "你是一位代码分析助手。请用一句话（不超过 20 个字）总结这段代码正在实现什么功能。只输出总结，不要解释。",
+      },
+      { role: "user", content: `代码片段：\n${snippet}` },
+    ]),
+    SUMMARY_STREAM_TIMEOUTS,
+  );
+  return text.trim();
 }
 
 /**
  * 实时收集流式响应，同时 emit 进度事件
  *
- * 超时保护（collectStreamText）：60s 无 chunk 判定 provider 挂起；
- * 300s 总时长硬上限——此前非流式调用曾被代理挂起 15 分钟才超时。
+ * 超时保护（collectStreamText，GENERATE_STREAM_TIMEOUTS）：
+ * 60s 无 chunk 判定 provider 挂起；600s 总时长仅作失控兜底——
+ * 完整重写大文件属正常时长，曾用 300s 误杀 follow-up 回退重写。
  *
  * @param stream - OpenAI 流式响应
  * @param bus - 事件总线
@@ -103,8 +176,17 @@ async function collectStreamWithProgress(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   bus?: AgentEventBus,
 ): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
-  let lastEmitLength = 0;
-  const EMIT_INTERVAL = 200; // 每 200 字符 emit 一次
+  // 每 200 字符 emit 一次进度（节流公共函数）
+  const emitProgress = throttleByChars(200, (acc) => {
+    const estimatedTokens = Math.round(acc.length * 0.75); // 中文字符估算
+    bus?.emit({
+      type: "agent:progress",
+      agent: "generate",
+      role: "前端工程师",
+      percent: Math.min(Math.round((acc.length / 3000) * 100), 99),
+      message: `已生成 ${acc.length} 字符（约 ${estimatedTokens} tokens）...`,
+    });
+  });
 
   // 子步骤解析：检测 <!-- SECTION: XXX --> 标记
   const SECTION_MARKERS = [
@@ -134,20 +216,9 @@ async function collectStreamWithProgress(
 
   const content = await collectStreamText(
     stream,
-    { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
+    GENERATE_STREAM_TIMEOUTS,
     (acc) => {
-      // 每 200 字符 emit 进度
-      if (acc.length - lastEmitLength >= EMIT_INTERVAL) {
-        lastEmitLength = acc.length;
-        const estimatedTokens = Math.round(acc.length * 0.75); // 中文字符估算
-        bus?.emit({
-          type: "agent:progress",
-          agent: "generate",
-          role: "前端工程师",
-          percent: Math.min(Math.round((acc.length / 3000) * 100), 99),
-          message: `已生成 ${acc.length} 字符（约 ${estimatedTokens} tokens）...`,
-        });
-      }
+      emitProgress(acc);
 
       // 检测子步骤标记
       for (const marker of SECTION_MARKERS) {
@@ -248,8 +319,14 @@ export function createLLMExecutors(
         model: config.model,
         promptLength: messages[1]?.content?.length ?? 0,
       });
-      const response = await chat(config, messages);
-      const text = response.choices[0]?.message?.content ?? "";
+      const response = await streamChat(config, messages);
+      const text = await collectJsonStream(
+        response,
+        bus,
+        "clarify",
+        "产品经理",
+        "需求澄清中",
+      );
       console.log("[DEBUG] Clarify 响应:", {
         textLength: text.length,
         textPrefix: text.slice(0, 100),
@@ -295,8 +372,14 @@ export function createLLMExecutors(
         model: config.model,
         promptLength: messages[1]?.content?.length ?? 0,
       });
-      const response = await chat(config, messages);
-      const text = response.choices[0]?.message?.content ?? "";
+      const response = await streamChat(config, messages);
+      const text = await collectJsonStream(
+        response,
+        bus,
+        "spec",
+        "架构师",
+        "规格设计中",
+      );
       console.log("[DEBUG] Spec 响应:", {
         textLength: text.length,
         textPrefix: text.slice(0, 100),
@@ -367,22 +450,12 @@ export function createLLMExecutors(
             hasCurrentCode ? currentFiles : undefined,
             errors,
           );
-          // 流式 + 超时保护（与主生成路径同一套 60s idle / 300s total）
-          let lastStageEmit = 0;
-          const rawContent = await collectStreamText(
+          // 流式 + 超时保护（统一走 collectGenerateStream 公共入口）
+          const rawContent = await collectGenerateStream(
             await streamChat(MODEL_ROUTING.generate, messages),
-            { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
-            (acc) => {
-              if (acc.length - lastStageEmit >= 2000) {
-                lastStageEmit = acc.length;
-                bus?.emit({
-                  type: "agent:progress",
-                  agent: agentName,
-                  role: "前端工程师",
-                  message: `${stage} 阶段：已生成 ${acc.length} 字符...`,
-                });
-              }
-            },
+            bus,
+            agentName,
+            (len) => `${stage} 阶段：已生成 ${len} 字符...`,
           );
           // 剥离可能的 markdown 围栏（与主生成路径 extractHtml 对齐，
           // 模型用 ``` 包裹时不过阶段校验会白耗 fix 轮次）
@@ -434,21 +507,11 @@ export function createLLMExecutors(
           );
           // 流式 + 超时保护：此前非流式 chat() 被代理挂起 15 分钟才超时（线上事故），
           // 流式让进度可观测（每 2000 字符 emit 一次），60s 无 chunk 即判失败
-          let lastFollowUpEmit = 0;
-          const patchText = await collectStreamText(
+          const patchText = await collectGenerateStream(
             await streamChat(MODEL_ROUTING.generate, messages),
-            { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
-            (acc) => {
-              if (acc.length - lastFollowUpEmit >= 2000) {
-                lastFollowUpEmit = acc.length;
-                bus?.emit({
-                  type: "agent:progress",
-                  agent: "generate",
-                  role: "前端工程师",
-                  message: `已接收 ${acc.length} 字符修改指令...`,
-                });
-              }
-            },
+            bus,
+            "generate",
+            (len) => `已接收 ${len} 字符修改指令...`,
           );
 
           bus?.emit({
@@ -515,21 +578,11 @@ export function createLLMExecutors(
           const messages = buildPatchPrompt(currentHtml, errors);
 
           // 流式 + 超时保护（同 follow-up：非流式长请求会被代理静默挂起）
-          let lastPatchEmit = 0;
-          const patchText = await collectStreamText(
+          const patchText = await collectGenerateStream(
             await streamChat(MODEL_ROUTING.generate, messages),
-            { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
-            (acc) => {
-              if (acc.length - lastPatchEmit >= 2000) {
-                lastPatchEmit = acc.length;
-                bus?.emit({
-                  type: "agent:progress",
-                  agent: "generate",
-                  role: "前端工程师",
-                  message: `第 ${patchRound} 轮修复：已接收 ${acc.length} 字符 Patch...`,
-                });
-              }
-            },
+            bus,
+            "generate",
+            (len) => `第 ${patchRound} 轮修复：已接收 ${len} 字符 Patch...`,
           );
 
           bus?.emit({

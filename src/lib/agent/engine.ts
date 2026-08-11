@@ -14,7 +14,12 @@ import type { AgentEventBus } from "./bus";
 import { createRoles, ROLES, type Role, type RoleId } from "./role";
 import { MessageTopic } from "./message";
 import { mergeFullstack, findMissingPages } from "./merge";
-import { applyPatch, formatPatchFeedback, parsePatch } from "./patch";
+import {
+  applyPatch,
+  formatPatchFeedback,
+  parsePatch,
+  summarizeAppliedPatch,
+} from "./patch";
 import type { SOPCondition, SOPConfig, SOPStep } from "./sop";
 import type {
   ClarifyOutput,
@@ -381,11 +386,17 @@ async function executeStep(
         .filter((_, i) => applied.details[i]?.status === "applied")
         .reduce((n, b) => n + b.search.length, 0);
       const changeRatio = base.length > 0 ? changedChars / base.length : 0;
+      // diff 透明化：改动摘要进版本 notes 与阶段详情（展示用途，不做门禁）
+      const summary = summarizeAppliedPatch(
+        blocks,
+        applied.details,
+        ctx.locate?.anchors,
+      );
 
       if (pass) {
         ctx.generated = {
           files: [{ path: "index.html", content: applied.newContent }],
-          notes: `补丁应用成功：${applied.applied} 个块，代码 ${base.length} → ${applied.newContent.length} 字符`,
+          notes: `${summary}；代码 ${base.length} → ${applied.newContent.length} 字符`,
         };
         ctx.lastErrors = undefined;
         ctx.patchFeedback = undefined;
@@ -399,9 +410,14 @@ async function executeStep(
         type: "agent:complete",
         agent: step.name,
         role: roleName,
-        output: { pass, applied: applied.applied, failed: applied.failed },
+        output: {
+          pass,
+          applied: applied.applied,
+          failed: applied.failed,
+          summary,
+        },
         message: pass
-          ? `补丁应用成功（${applied.applied} 个块${changeRatio > 0.5 ? "，⚠️ 改动范围超过 50%" : ""}）`
+          ? `${summary}${changeRatio > 0.5 ? "（⚠️ 改动范围超过 50%）" : ""}`
           : `补丁应用失败：${applied.failed} 个块未命中${noOp ? " / 无实际修改" : ""}，转入重试`,
       });
       return { pass, applied: applied.applied, failed: applied.failed };

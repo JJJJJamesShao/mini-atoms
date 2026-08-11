@@ -50,7 +50,12 @@ export async function streamChat(
   });
 }
 
-/** 发起非流式对话 */
+/**
+ * 发起非流式对话 — 仅供 src/scripts/ 手动测试脚本使用。
+ * 生产代码一律走 streamChat + collectStreamText：
+ * 非流式长请求曾被代理静默挂起 15 分钟（follow-up 假死事故），
+ * 流式 + 主动 idle/total 超时可观测、可干预。
+ */
 export async function chat(
   config: ModelConfig,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
@@ -63,8 +68,6 @@ export async function chat(
       temperature: config.temperature,
       stream: false,
     },
-    // 显式超时：SDK 默认 10min + 重试 2 次，曾致 follow-up 假死 15 分钟。
-    // clarify/spec/摘要等非流式调用正常为秒级，120s + 1 次重试足够。
     { timeout: 120_000, maxRetries: 1 },
   );
 }
@@ -82,21 +85,5 @@ export async function streamGLM(
     max_tokens: options?.maxTokens ?? 131072,
     temperature: options?.temperature ?? 0.2,
     stream: true,
-  });
-}
-
-/** GLM 专用非流式对话 */
-export async function chatGLM(
-  messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  options?: { maxTokens?: number; temperature?: number },
-) {
-  const client = getGLMClient();
-  const model = process.env.GLM_5_2 ?? "glm-5.2";
-  return client.chat.completions.create({
-    model,
-    messages,
-    max_tokens: options?.maxTokens ?? 131072,
-    temperature: options?.temperature ?? 0.2,
-    stream: false,
   });
 }

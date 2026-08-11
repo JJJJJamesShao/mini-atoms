@@ -34,6 +34,23 @@ export class StreamTimeoutError extends Error {
 }
 
 /**
+ * 按字符增量节流的回调工厂：每新累积 intervalChars 才触发一次 fn。
+ * 用于流式进度事件，避免逐 chunk 刷新事件总线。
+ */
+export function throttleByChars(
+  intervalChars: number,
+  fn: (accumulated: string) => void,
+): (accumulated: string, delta?: string) => void {
+  let last = 0;
+  return (accumulated) => {
+    if (accumulated.length - last >= intervalChars) {
+      last = accumulated.length;
+      fn(accumulated);
+    }
+  };
+}
+
+/**
  * 逐 chunk 收集 content 文本，带 idle/total 双重超时保护。
  *
  * @param stream - OpenAI 流式响应

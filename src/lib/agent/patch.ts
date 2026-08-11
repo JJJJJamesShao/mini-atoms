@@ -245,3 +245,34 @@ export function formatPatchFeedback(result: ApplyResult): string {
   lines.push("请修正失败的 SEARCH 块后重试。");
   return lines.join("\n");
 }
+
+/**
+ * 已应用补丁的人类可读摘要（diff 透明化）：把补丁块映射回 locate 锚点。
+ *
+ * 匹配规则：锚点 searchHint 出现在块 search 文本中即归属该锚点；
+ * 未匹配任何锚点的块归入"其他改动"。仅用于展示（版本日志/阶段详情），
+ * 不做门禁——锚点是 LLM 输出的模糊描述，做包含判定误报率太高（V2 评估结论）。
+ */
+export function summarizeAppliedPatch(
+  blocks: PatchBlock[],
+  details: ApplyResult["details"],
+  anchors?: Array<{ description: string; searchHint: string }>,
+): string {
+  const appliedBlocks = blocks.filter(
+    (_, i) => details[i]?.status === "applied",
+  );
+  if (appliedBlocks.length === 0) return "无有效修改";
+
+  const buckets = new Map<string, number>(); // 改动点描述 → 改动字符数
+  for (const block of appliedBlocks) {
+    const anchor = anchors?.find(
+      (a) => a.searchHint && block.search.includes(a.searchHint),
+    );
+    const key = anchor?.description ?? "其他改动";
+    buckets.set(key, (buckets.get(key) ?? 0) + block.search.length);
+  }
+  const parts = [...buckets.entries()].map(
+    ([desc, chars]) => `${desc}（~${chars} 字符）`,
+  );
+  return `修改 ${appliedBlocks.length} 处：${parts.join("、")}`;
+}

@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { applyPatch, parsePatch } from "../src/lib/agent/patch";
+import {
+  applyPatch,
+  parsePatch,
+  summarizeAppliedPatch,
+} from "../src/lib/agent/patch";
 
 const DOC = [
   "<!DOCTYPE html>",
@@ -153,5 +157,50 @@ describe("parsePatch", () => {
 
   it("无块时返回空数组", () => {
     expect(parsePatch("没有补丁的普通文本")).toEqual([]);
+  });
+});
+
+describe("summarizeAppliedPatch 改动摘要", () => {
+  const ANCHORS = [
+    { description: "主题色 CSS 变量", searchHint: "--primary" },
+    { description: "按钮点击事件", searchHint: "addEventListener" },
+  ];
+
+  it("块按 searchHint 映射回锚点，聚合字符数", () => {
+    const blocks = [
+      { search: ":root { --primary: blue; }", replace: "x" },
+      { search: 'btn.addEventListener("click", a)', replace: "y" },
+      { search: 'btn.addEventListener("click", b)', replace: "z" },
+    ];
+    const details = blocks.map((_, index) => ({
+      index,
+      status: "applied" as const,
+    }));
+    const summary = summarizeAppliedPatch(blocks, details, ANCHORS);
+    expect(summary).toBe(
+      "修改 3 处：主题色 CSS 变量（~26 字符）、按钮点击事件（~64 字符）",
+    );
+  });
+
+  it("未匹配锚点的块归入「其他改动」", () => {
+    const blocks = [{ search: "<footer>old</footer>", replace: "x" }];
+    const details = [{ index: 0, status: "applied" as const }];
+    expect(summarizeAppliedPatch(blocks, details, ANCHORS)).toBe(
+      "修改 1 处：其他改动（~20 字符）",
+    );
+  });
+
+  it("无锚点（非 modify 流程）时全部归入「其他改动」", () => {
+    const blocks = [{ search: "a", replace: "b" }];
+    const details = [{ index: 0, status: "applied" as const }];
+    expect(summarizeAppliedPatch(blocks, details)).toBe(
+      "修改 1 处：其他改动（~1 字符）",
+    );
+  });
+
+  it("失败块不计入；全部失败时返回无有效修改", () => {
+    const blocks = [{ search: "--primary: blue", replace: "x" }];
+    const details = [{ index: 0, status: "failed" as const }];
+    expect(summarizeAppliedPatch(blocks, details, ANCHORS)).toBe("无有效修改");
   });
 });

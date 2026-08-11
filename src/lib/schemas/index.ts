@@ -66,3 +66,24 @@ export const VerifyResultSchema = z.object({
   errors: z.array(VerifyErrorSchema),
 });
 export type VerifyResult = z.infer<typeof VerifyResultSchema>;
+
+/**
+ * 改动定位节点输出（modify SOP 的 locate 步骤）。
+ * 把"在哪里改"从补丁生成里拆出来：快模型读现有代码 + 修改意图，
+ * 输出改动点锚点，patch 步骤据此聚焦生成 SEARCH/REPLACE 块。
+ */
+export const LocateOutputSchema = z.object({
+  /** 修改意图的一句话概括 */
+  intent: z.string(),
+  /** 改动点锚点列表 */
+  anchors: z.array(
+    z.object({
+      id: z.string(),
+      /** 改动点描述（如"导航栏主题色 CSS 变量"） */
+      description: z.string(),
+      /** 定位提示：改动点附近可精确搜索的代码片段 */
+      searchHint: z.string(),
+    }),
+  ),
+});
+export type LocateOutput = z.infer<typeof LocateOutputSchema>;

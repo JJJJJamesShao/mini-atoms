@@ -1,4 +1,4 @@
-import type { SpecOutput, VerifyResult } from "@/lib/schemas";
+import type { File, SpecOutput, VerifyResult } from "@/lib/schemas";
 
 // ===== 核心 System Prompt（深度调优版） =====
 
@@ -303,6 +303,108 @@ const SYSTEM_GENERATE_GAME = `你是一位 HTML5 游戏开发专家。
 - 包含完整的游戏循环、碰撞检测、得分系统
 - 支持键盘和触摸控制
 - 直接输出 JSON，不要包裹 markdown 代码块，不要添加解释文字`;
+
+// ===== 多阶段 SOP 专用 Prompt（fullstack-app，merge 为确定性组装无需 prompt） =====
+
+const SYSTEM_GENERATE_SCHEMA = `你是一位数据库架构师，负责设计前端应用的数据层。
+
+## 强约束（违反即校验失败）
+
+1. 只输出纯 JavaScript 代码，禁止任何 HTML、CSS、DOM 操作
+2. 不要使用 import/export（代码将被原样内联到 <script> 中）
+3. 不要在字符串字面量中包含 "</script>"（需要时写成 "<\\/script>"）
+
+## 输出内容
+
+一个自包含的 JS 代码块，包含：
+
+1. 数据实体定义（JS 对象描述各实体字段与类型）
+2. 基于 localStorage 的 CRUD 工具函数：create / read / update / remove / list
+3. 简单校验（必填字段、基本类型检查）
+4. 如需鉴权：register/login/logout/currentUser 等函数（密码只做简单哈希或明文标记为演示，session 存 localStorage）
+
+直接输出代码，不要 markdown 代码块，不要解释文字。`;
+
+const SYSTEM_GENERATE_SHELL = `你是一位前端工程师，负责生成多页面应用的页面骨架。
+
+## 强约束（违反即校验失败）
+
+1. 输出完整 HTML：<!DOCTYPE html> 开头，内联全部 CSS 和 JS
+2. 每个页面区域必须用 <!-- PAGE_CONTENT:页面名 --> 占位（页面名用英文小写，如 home / login / detail），一个页面一个占位符
+3. 包含导航栏与页面切换逻辑（点击导航显示对应区域、隐藏其他区域）
+4. 不实现任何具体页面功能：不写业务数据处理、不写表单逻辑
+5. 不要在字符串字面量中包含 "</script>"
+
+## 输出内容
+
+- 整体布局：顶部导航 + 主内容区
+- 每个页面的外层容器（带 id，如 <section id="page-home">），容器内放占位符注释
+- 页面切换函数（纯 DOM 显示/隐藏）
+- 响应式布局（flex/grid + @media）
+
+直接输出 HTML 代码，不要 markdown 代码块，不要解释文字。`;
+
+const SYSTEM_GENERATE_PAGES = `你是一位前端工程师，负责实现应用的各个页面。
+
+## 输出格式契约（合并程序按此切分，必须严格遵守）
+
+每个页面一个块，以分隔符开头：
+
+// === PAGE: 页面名 ===
+（该页面的 HTML 片段，可含内联 <script>）
+
+// === PAGE: 另一个页面名 ===
+...
+
+## 强约束（违反即校验失败）
+
+1. 输入的 shell 中每个 <!-- PAGE_CONTENT:name --> 占位符都必须有对应的 PAGE 块，名称完全一致、一个不漏
+2. 只输出页面内容片段：禁止重复输出 <!DOCTYPE>、<html>、<head> 等文档结构
+3. 数据操作必须使用输入中数据层（schema.js）提供的函数，函数名前用 typeof 检查存在性
+4. 不修改路由与布局：页面切换由 shell 的导航逻辑负责
+5. 不要在字符串字面量中包含 "</script>"
+
+直接输出 PAGE 块序列，不要 markdown 代码块，不要解释文字。`;
+
+/** 多阶段生成的 prompt 构建（stage: schema/shell/pages） */
+export function buildStagePrompt(
+  stage: string,
+  spec: SpecOutput,
+  currentFiles?: File[],
+  errors?: VerifyResult["errors"],
+): Array<{ role: "system" | "user"; content: string }> {
+  const system =
+    stage === "schema"
+      ? SYSTEM_GENERATE_SCHEMA
+      : stage === "shell"
+        ? SYSTEM_GENERATE_SHELL
+        : SYSTEM_GENERATE_PAGES;
+
+  let userContent =
+    "规格：\n- " +
+    spec.requirements.join("\n- ") +
+    "\n\n约束：\n- " +
+    spec.constraints.join("\n- ");
+
+  if (currentFiles && currentFiles.length > 0) {
+    userContent +=
+      "\n\n前置阶段产物：\n" +
+      currentFiles.map((f) => `--- ${f.path} ---\n${f.content}`).join("\n\n");
+  }
+
+  if (errors && errors.length > 0) {
+    userContent +=
+      "\n\n上一版产物校验未通过（共 " +
+      errors.length +
+      " 处），请修正后重新输出：\n\n" +
+      formatErrorsForLLM(errors);
+  }
+
+  return [
+    { role: "system" as const, content: system },
+    { role: "user" as const, content: userContent },
+  ];
+}
 
 // --- patch 模式（精确编辑，避免完整重写） ---
 

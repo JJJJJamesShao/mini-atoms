@@ -10,6 +10,13 @@ export const STAGE_ORDER = [
   "spec",
   "approve",
   "generate",
+  "generate-schema",
+  "verify-schema",
+  "generate-shell",
+  "verify-shell",
+  "generate-pages",
+  "verify-pages",
+  "merge",
   "verify",
   "done",
 ] as const;
@@ -336,26 +343,30 @@ export function useWorkspace() {
               );
             } else if (agentStage === "generate") {
               setStage("generate", "done", ae.message ?? "代码已生成");
-            } else if (agentStage === "verify") {
+            } else if (agentStage.startsWith("verify")) {
+              // verify / verify-schema / verify-shell / verify-pages
               const out = ae.output as { pass?: boolean } | undefined;
               setStage(
-                "verify",
+                agentStage,
                 out?.pass !== false ? "done" : "failed",
                 ae.message ?? "校验完成",
               );
+            } else {
+              // 多阶段步骤（generate-schema / generate-shell / generate-pages / merge）
+              setStage(agentStage, "done", ae.message ?? "完成");
             }
             return;
           }
 
           if (
             (ae.type === "agent:thinking" || ae.type === "agent:progress") &&
-            ae.agent === "generate"
+            agentStage.startsWith("generate")
           ) {
             const msg =
               ae.message ||
               (ae.percent ? `进度 ${ae.percent}%` : "正在生成...");
-            setStage("generate", "active", msg);
-            pushLog("generate", "progress", msg);
+            setStage(agentStage, "active", msg);
+            pushLog(agentStage, "progress", msg);
             return;
           }
 

@@ -11,11 +11,14 @@
 
 import { SOP_REGISTRY, type SOPConfig } from "./sop";
 
+const FULLSTACK_PATTERN =
+  /博客|管理系统|数据库|登录|注册|后台|crud|增删改查|blog|admin|dashboard/i;
 const GAME_PATTERN = /游戏|game|贪吃蛇|数独|坦克|snake|sudoku/i;
 const TOOL_PATTERN = /工具|计算器|计时器|待办|tool|calculator|timer|todo/i;
 
 /** 选择 SOP id */
 export function selectSOPId(input: string): string {
+  if (FULLSTACK_PATTERN.test(input)) return "fullstack-app";
   if (GAME_PATTERN.test(input)) return "game";
   if (TOOL_PATTERN.test(input)) return "tool";
   return "web-app";

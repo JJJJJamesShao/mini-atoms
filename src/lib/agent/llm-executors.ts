@@ -11,6 +11,7 @@ import {
   buildGeneratePrompt,
   buildPatchPrompt,
   buildSpecPrompt,
+  buildStagePrompt,
 } from "@/lib/llm/prompts";
 import {
   mergeToSingleHtml,
@@ -19,6 +20,7 @@ import {
 } from "@/lib/schemas/code-artifact";
 import { applyPatch, parsePatch } from "./patch";
 import { verifyProject } from "../verify";
+import { verifyStageCode } from "../verify/stage";
 import type { AgentEvent, AgentEventBus } from "./bus";
 import { AgentMemory } from "./memory";
 import { MessageTopic } from "./message";
@@ -314,16 +316,18 @@ export function createLLMExecutors(
       return result;
     },
 
-    generate: async (spec, errors, currentFiles, attempt = 0) => {
+    generate: async (spec, errors, currentFiles, attempt = 0, stage) => {
       const isFixMode = errors && errors.length > 0;
       const hasCurrentCode = currentFiles && currentFiles.length > 0;
       const fixAttempt = attempt; // 0=首次, 1+=修复轮次
+      // 多阶段 SOP：事件以步骤名命名（generate-schema 等），与前端阶段卡片对齐
+      const agentName = stage ? `generate-${stage}` : "generate";
 
       emit({
         type: "agent:start",
-        agent: "generate",
+        agent: agentName,
         role: "前端工程师",
-        input: { spec, errors, isFixMode, hasCurrentCode },
+        input: { spec, errors, isFixMode, hasCurrentCode, stage },
       });
       memory.generate.add({
         topic: MessageTopic.ARCH_SPEC,
@@ -339,6 +343,80 @@ export function createLLMExecutors(
       }
 
       try {
+        // === 多阶段 SOP 模式：stage 存在 → 阶段专用 prompt，产出中间产物 ===
+        if (stage) {
+          const stageFile =
+            stage === "schema"
+              ? "schema.js"
+              : stage === "shell"
+                ? "shell.html"
+                : "pages.js";
+          bus?.emit({
+            type: "agent:progress",
+            agent: agentName,
+            role: "前端工程师",
+            percent: 5,
+            message: isFixMode
+              ? `重修 ${stage} 阶段产物（第 ${fixAttempt} 次修复）...`
+              : `生成 ${stage} 阶段产物...`,
+          });
+
+          const messages = buildStagePrompt(
+            stage,
+            spec,
+            hasCurrentCode ? currentFiles : undefined,
+            errors,
+          );
+          // 流式 + 超时保护（与主生成路径同一套 60s idle / 300s total）
+          let lastStageEmit = 0;
+          const rawContent = await collectStreamText(
+            await streamChat(MODEL_ROUTING.generate, messages),
+            { idleTimeoutMs: 60_000, totalTimeoutMs: 300_000 },
+            (acc) => {
+              if (acc.length - lastStageEmit >= 2000) {
+                lastStageEmit = acc.length;
+                bus?.emit({
+                  type: "agent:progress",
+                  agent: agentName,
+                  role: "前端工程师",
+                  message: `${stage} 阶段：已生成 ${acc.length} 字符...`,
+                });
+              }
+            },
+          );
+          // 剥离可能的 markdown 围栏（与主生成路径 extractHtml 对齐，
+          // 模型用 ``` 包裹时不过阶段校验会白耗 fix 轮次）
+          const content = extractHtml(rawContent);
+
+          const result: GenerateOutput = {
+            files: [{ path: stageFile, content: content.trim() }],
+            notes: `${stage} 阶段产物生成完成（${content.trim().length} 字符）`,
+          };
+          memory.generate.add({
+            topic: MessageTopic.CODE,
+            content: JSON.stringify(result),
+            metadata: { direction: "out" },
+          });
+          bus?.emit({
+            type: "file:generated",
+            agent: agentName,
+            role: "前端工程师",
+            message: `${stageFile}（${result.files[0].content.length} 字符）`,
+            output: {
+              path: stageFile,
+              size: result.files[0].content.length,
+            },
+          });
+          emit({
+            type: "agent:complete",
+            agent: agentName,
+            role: "前端工程师",
+            output: result,
+            message: result.notes,
+          });
+          return result;
+        }
+
         // === FOLLOW-UP 模式：有当前代码 + 无错误 → 基于现有代码做增量修改 ===
         if (!isFixMode && hasCurrentCode) {
           const currentHtml = currentFiles[0].content;
@@ -610,7 +688,7 @@ export function createLLMExecutors(
         console.error("[Generate Error]", errorMsg, err);
         bus?.emit({
           type: "agent:error",
-          agent: "generate",
+          agent: agentName,
           role: "前端工程师",
           error: errorMsg,
         });
@@ -618,10 +696,13 @@ export function createLLMExecutors(
       }
     },
 
-    verify: async (files) => {
+    verify: async (files, stage) => {
+      // 多阶段 SOP：阶段产物走阶段级校验（schema/pages 验 JS 语法、shell 验骨架），
+      // 事件以步骤名命名（verify-schema 等），与前端阶段卡片对齐
+      const agentName = stage ? `verify-${stage}` : "verify";
       emit({
         type: "agent:start",
-        agent: "verify",
+        agent: agentName,
         role: "代码审查员",
         input: files,
       });
@@ -630,7 +711,9 @@ export function createLLMExecutors(
         content: JSON.stringify(files),
         metadata: { direction: "in" },
       });
-      const result = verifyProject(files);
+      const result = stage
+        ? verifyStageCode(files[0]?.content ?? "", stage)
+        : verifyProject(files);
       memory.verify.add({
         topic: MessageTopic.REVIEW,
         content: JSON.stringify(result),
@@ -638,7 +721,7 @@ export function createLLMExecutors(
       });
       emit({
         type: "agent:complete",
-        agent: "verify",
+        agent: agentName,
         role: "代码审查员",
         output: result,
       });

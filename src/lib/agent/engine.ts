@@ -13,6 +13,7 @@ import type { Executors, Approver } from "./index";
 import type { AgentEventBus } from "./bus";
 import { createRoles, ROLES, type Role, type RoleId } from "./role";
 import { MessageTopic } from "./message";
+import { mergeFullstack, findMissingPages } from "./merge";
 import type { SOPCondition, SOPConfig, SOPStep } from "./sop";
 import type {
   ClarifyOutput,
@@ -35,6 +36,8 @@ export interface SOPRunResult {
   questions?: string[];
   /** finalState 为 done 时的生成产物 */
   result?: GenerateOutput;
+  /** 多阶段 SOP 的中间产物（schema/shell/pages 原始代码，落库供排查与回放） */
+  stageOutputs?: Record<string, GenerateOutput>;
 }
 
 /** 跨步骤共享的执行上下文 */
@@ -47,6 +50,37 @@ interface ExecutionContext {
   fixAttempts: number;
   /** 对话迭代时传入的初始代码 */
   initialFiles?: File[];
+  /** 多阶段 SOP：各阶段产物（generate-X 步骤名 → 输出） */
+  stageOutputs: Record<string, GenerateOutput>;
+}
+
+/**
+ * 从步骤名解析多阶段标识：generate-schema → "schema"、verify-pages → "pages"；
+ * 无后缀的单阶段步骤（generate/verify）返回 undefined
+ */
+function stageOfStep(stepName: string): string | undefined {
+  const match = stepName.match(/^(?:generate|verify)-(.+)$/);
+  return match ? match[1] : undefined;
+}
+
+/** 多阶段 SOP：当前阶段生成时作为输入的前置产物 */
+function stageInputFiles(
+  ctx: ExecutionContext,
+  stage: string | undefined,
+): File[] | undefined {
+  switch (stage) {
+    case "schema":
+      return ctx.initialFiles;
+    case "shell":
+      return ctx.stageOutputs["schema"]?.files;
+    case "pages":
+      return [
+        ...(ctx.stageOutputs["schema"]?.files ?? []),
+        ...(ctx.stageOutputs["shell"]?.files ?? []),
+      ];
+    default:
+      return ctx.initialFiles ?? ctx.generated?.files;
+  }
 }
 
 /**
@@ -74,6 +108,7 @@ export async function runSOP(
     lastErrors: undefined,
     fixAttempts: 0,
     initialFiles,
+    stageOutputs: {},
   };
 
   let current: string | undefined = sop.steps[0]?.name;
@@ -94,6 +129,10 @@ export async function runSOP(
         finalState: "done",
         reason: null,
         result: ctx.generated ?? undefined,
+        stageOutputs:
+          Object.keys(ctx.stageOutputs).length > 0
+            ? ctx.stageOutputs
+            : undefined,
       };
     }
     if (step.action === "fail") {
@@ -120,7 +159,16 @@ export async function runSOP(
 
     if (next === "fail") {
       const reason = deriveFailReason(step);
-      const runResult: SOPRunResult = { sop, finalState: "fail", reason };
+      const runResult: SOPRunResult = {
+        sop,
+        finalState: "fail",
+        reason,
+        // 多阶段失败时中间产物一并带出（落库供排查）
+        stageOutputs:
+          Object.keys(ctx.stageOutputs).length > 0
+            ? ctx.stageOutputs
+            : undefined,
+      };
       // 软着陆：澄清不足不掐死任务，把模型想确认的问题透传给前端引导用户补充
       if (reason === "need_clarification") {
         const clarifyOut = output as ClarifyOutput | null;
@@ -166,6 +214,7 @@ function stepToTopic(step: SOPStep): MessageTopic {
     case "spec":
       return MessageTopic.ARCH_SPEC;
     case "generate":
+    case "merge":
       return MessageTopic.CODE;
     case "verify":
       return MessageTopic.REVIEW;
@@ -231,31 +280,92 @@ async function executeStep(
     }
     case "generate": {
       if (!ctx.spec) throw new Error("generate 步骤缺少 spec 产物");
-      // 对话迭代：传入初始代码（如果有），否则用当前生成产物（fix 模式）
-      const currentFiles = ctx.initialFiles ?? ctx.generated?.files;
-      // fix 模式：传入当前代码和 fix 轮次，让 generate 走 patch 编辑而非完整重写
+      const stage = stageOfStep(step.name);
+      // fix 模式（有校验错误）：重修当前阶段产物——优先取该阶段自己的上次输出
+      // （最终 verify 失败回 generate-pages 时 ctx.generated 已是 merge 产物，
+      // 直接用它会把 index.html 当成 pages 上下文，契约错位）
+      const currentFiles = ctx.lastErrors?.length
+        ? ((stage ? ctx.stageOutputs[stage]?.files : undefined) ??
+          ctx.generated?.files ??
+          stageInputFiles(ctx, stage))
+        : stageInputFiles(ctx, stage);
       const out = await executors.generate(
         ctx.spec,
         ctx.lastErrors,
         currentFiles,
         ctx.fixAttempts,
+        stage,
       );
       ctx.generated = out;
+      if (stage) ctx.stageOutputs[stage] = out;
       return out;
     }
     case "verify": {
       if (!ctx.generated) throw new Error("verify 步骤缺少 generate 产物");
-      const out = await executors.verify(ctx.generated.files);
-      if (!out.pass) ctx.lastErrors = out.errors;
+      const stage = stageOfStep(step.name);
+      const out = await executors.verify(ctx.generated.files, stage);
+      // 多阶段 SOP 必须清理：上一阶段的错误不能污染下一阶段（否则误判为 fix 模式）
+      ctx.lastErrors = out.pass ? undefined : out.errors;
       return out;
     }
+    case "merge": {
+      // 确定性合并（零 LLM）：schema + shell + pages → index.html
+      const schema = ctx.stageOutputs["schema"];
+      const shell = ctx.stageOutputs["shell"];
+      const pages = ctx.stageOutputs["pages"];
+      if (!schema || !shell || !pages) {
+        throw new Error("merge 步骤缺少阶段产物（schema/shell/pages）");
+      }
+      bus?.emit({
+        type: "agent:start",
+        agent: step.name,
+        role: roleName,
+        message: "合并各阶段产物",
+      });
+      const merged = mergeFullstack(
+        schema.files[0]?.content ?? "",
+        shell.files[0]?.content ?? "",
+        pages.files[0]?.content ?? "",
+      );
+      const out: GenerateOutput = {
+        files: [{ path: "index.html", content: merged }],
+        notes: `多阶段合并完成：schema ${schema.files[0]?.content.length ?? 0} 字符 + shell ${shell.files[0]?.content.length ?? 0} 字符 + pages ${pages.files[0]?.content.length ?? 0} 字符 → ${merged.length} 字符`,
+      };
+      ctx.generated = out;
+      // 缺页检测：pages 输出与 shell 占位符不匹配时，设置 lastErrors 并经
+      // SOP 条件分支（missingPages 非空）进 fix-pages 重修循环——不得以
+      // 缺页状态进入最终 verify（verifyProject 不认识 PAGE_CONTENT 标记）
+      const missingPages = findMissingPages(
+        shell.files[0]?.content ?? "",
+        pages.files[0]?.content ?? "",
+      );
+      if (missingPages.length > 0) {
+        ctx.lastErrors = missingPages.map((name) => ({
+          rule: "merge-missing-page",
+          message: `页面 ${name} 的实现缺失：pages 输出中缺少 // === PAGE: ${name} === 块`,
+        }));
+      }
+      bus?.emit({
+        type: "agent:complete",
+        agent: step.name,
+        role: roleName,
+        output: out,
+        message:
+          missingPages.length > 0
+            ? `合并完成，但缺失页面：${missingPages.join("、")}，转入重修`
+            : out.notes,
+      });
+      return { ...out, missingPages };
+    }
     case "fix": {
-      // fix 不调用执行器：记录次数并回退到 generate 重新生成
+      // fix 不调用执行器：记录次数并回退到 generate 重新生成。
+      // 事件挂到对应的 generate 阶段卡片上（fix-schema → generate-schema），
+      // fix 是内部步骤，不在前端阶段列表中展示
       ctx.fixAttempts += 1;
       const exhausted = ctx.fixAttempts >= MAX_FIX_ATTEMPTS;
       bus?.emit({
         type: "agent:thinking",
-        agent: "generate",
+        agent: step.name.replace(/^fix($|-)/, "generate$1"),
         role: ROLES.engineer.config.name,
         message: exhausted
           ? "修复次数用尽"

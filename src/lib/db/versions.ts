@@ -29,6 +29,8 @@ export interface ProcessData {
   parentVersionNo: number | null;
   /** need_clarification 软着陆：待用户补充的澄清问题清单（003_clarify_questions.sql） */
   questions: string[] | null;
+  /** 多阶段 SOP 中间产物（005_stage_outputs.sql，{schema,shell,pages} 原始代码） */
+  stageOutputs: Record<string, unknown> | null;
 }
 
 export interface VersionRow {
@@ -48,6 +50,7 @@ export interface VersionRow {
   logs: ProcessLog[] | null;
   parent_version_no: number | null;
   questions: string[] | null;
+  stage_outputs: Record<string, unknown> | null;
 }
 
 export async function createVersion(
@@ -72,6 +75,7 @@ export async function createVersion(
             logs: process.logs,
             parent_version_no: process.parentVersionNo,
             questions: process.questions,
+            stage_outputs: process.stageOutputs,
           }
         : {}),
     })

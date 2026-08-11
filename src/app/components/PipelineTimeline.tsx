@@ -7,6 +7,13 @@ const STAGE_LABELS: Record<StageName, string> = {
   spec: "规格生成",
   approve: "规格确认",
   generate: "代码生成",
+  "generate-schema": "数据层生成",
+  "verify-schema": "数据层校验",
+  "generate-shell": "页面骨架生成",
+  "verify-shell": "骨架校验",
+  "generate-pages": "页面实现生成",
+  "verify-pages": "页面校验",
+  merge: "合并整合",
   verify: "校验",
   done: "完成",
 };

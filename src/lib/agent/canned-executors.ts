@@ -16,5 +16,21 @@ export function createCannedExecutors(scenarioId = "todo"): Executors {
     spec: async () => scenario.spec,
     generate: async () => scenario.generate,
     verify: async (files) => verifyProject(files),
+    // modify SOP 罐头实现：定位返回固定锚点，补丁返回空补丁文本
+    // （罐头场景不演练修改回路，仅满足接口；修改回路由 sop 测试的 mock 覆盖）
+    locate: async (input) => ({
+      intent: input,
+      anchors: [
+        {
+          id: "anchor-1",
+          description: "罐头定位锚点",
+          searchHint: "<body>",
+        },
+      ],
+    }),
+    patch: async (locate) => ({
+      patchText: "",
+      notes: `罐头补丁：${locate.intent}`,
+    }),
   };
 }

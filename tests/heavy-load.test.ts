@@ -30,6 +30,8 @@ function makeExecutors(): Executors {
       notes: "mock",
     }),
     verify: async () => VERIFY_OK,
+    locate: async (input) => ({ intent: input, anchors: [] }),
+    patch: async (locate) => ({ patchText: "", notes: locate.intent }),
   };
 }
 
@@ -64,7 +66,13 @@ describe("Heavy Load", () => {
   it("连续 50 次运行无内存泄漏（增长 < 50MB）", async () => {
     // 预热，排除一次性分配干扰
     for (let i = 0; i < 5; i++) {
-      await runSOP("预热", GAME_SOP, makeExecutors(), undefined, new AgentEventBus());
+      await runSOP(
+        "预热",
+        GAME_SOP,
+        makeExecutors(),
+        undefined,
+        new AgentEventBus(),
+      );
     }
     globalThis.gc?.();
 

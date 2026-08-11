@@ -72,6 +72,8 @@ function makeExecutors(overrides?: {
       calls.push("verify");
       return verifyQueue.length > 1 ? verifyQueue.shift()! : verifyQueue[0];
     },
+    locate: async (input) => ({ intent: input, anchors: [] }),
+    patch: async (locate) => ({ patchText: "", notes: locate.intent }),
   };
   return { executors, calls };
 }
@@ -236,6 +238,8 @@ describe("runSOP 执行引擎", () => {
         return { files: [{ path: `${stage}.out`, content }], notes: "ok" };
       },
       verify: async () => VERIFY_OK,
+      locate: async (input) => ({ intent: input, anchors: [] }),
+      patch: async (locate) => ({ patchText: "", notes: locate.intent }),
     };
     const out = await runSOP(
       "做一个带登录的博客",
@@ -288,6 +292,8 @@ describe("runSOP 执行引擎", () => {
       },
       verify: async () =>
         verifyQueue.length > 1 ? verifyQueue.shift()! : verifyQueue[0],
+      locate: async (input) => ({ intent: input, anchors: [] }),
+      patch: async (locate) => ({ patchText: "", notes: locate.intent }),
     };
     const out = await runSOP(
       "做一个带登录的博客",
@@ -329,6 +335,8 @@ describe("runSOP 执行引擎", () => {
         return { files: [{ path: `${stage}.out`, content }], notes: "ok" };
       },
       verify: async () => VERIFY_OK,
+      locate: async (input) => ({ intent: input, anchors: [] }),
+      patch: async (locate) => ({ patchText: "", notes: locate.intent }),
     };
     const out = await runSOP(
       "做一个带登录的博客",

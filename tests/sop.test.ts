@@ -6,12 +6,15 @@ import {
   DEFAULT_SOP,
   FULLSTACK_SOP,
   GAME_SOP,
+  MODIFY_SOP,
   SOP_REGISTRY,
 } from "../src/lib/agent/sop";
 import type { Executors } from "../src/lib/agent";
 import type {
   ClarifyOutput,
+  File,
   GenerateOutput,
+  LocateOutput,
   SpecOutput,
   VerifyResult,
 } from "../src/lib/schemas";
@@ -101,6 +104,21 @@ describe("selectSOP 路由", () => {
     expect(selectSOPId("做一个电商网站")).toBe("web-app");
   });
 
+  it("有现有代码（对话迭代）→ modify 增量修改小循环，优先级高于关键词", () => {
+    expect(selectSOPId("把标题改成蓝色", { hasCurrentCode: true })).toBe(
+      "modify",
+    );
+    expect(selectSOPId("做一个数独游戏", { hasCurrentCode: true })).toBe(
+      "modify",
+    );
+    expect(selectSOPId("做一个数独游戏", { hasCurrentCode: false })).toBe(
+      "game",
+    );
+    expect(selectSOP("把标题改成蓝色", { hasCurrentCode: true })).toBe(
+      MODIFY_SOP,
+    );
+  });
+
   it("tool 复用 web-app 完整流程；game 为精简流程（无 approve）", () => {
     expect(SOP_REGISTRY.get("tool")).toBe(DEFAULT_SOP);
     expect(selectSOP("做一个数独游戏")).toBe(GAME_SOP);
@@ -111,7 +129,7 @@ describe("selectSOP 路由", () => {
 
 describe("SOP 配置完整性", () => {
   it("所有步骤的跳转目标都存在，角色引用合法", () => {
-    for (const sop of [DEFAULT_SOP, GAME_SOP, FULLSTACK_SOP]) {
+    for (const sop of [DEFAULT_SOP, GAME_SOP, FULLSTACK_SOP, MODIFY_SOP]) {
       const names = new Set(sop.steps.map((s) => s.name));
       for (const step of sop.steps) {
         const targets =
@@ -352,5 +370,176 @@ describe("runSOP 执行引擎", () => {
     const html = out.result?.files[0].content ?? "";
     expect(html).toContain("<form>登录</form>");
     expect(html).not.toContain("的实现缺失");
+  });
+});
+
+describe("modify SOP 增量修改小循环", () => {
+  const BASE_HTML = "<!DOCTYPE html><html><body><h1>旧标题</h1></body></html>";
+  const BASE_FILES: File[] = [{ path: "index.html", content: BASE_HTML }];
+  const LOCATE: LocateOutput = {
+    intent: "把标题改成新标题",
+    anchors: [
+      { id: "a1", description: "主标题", searchHint: "<h1>旧标题</h1>" },
+    ],
+  };
+  const GOOD_PATCH = [
+    "<<<<<<< SEARCH",
+    "<h1>旧标题</h1>",
+    "=======",
+    "<h1>新标题</h1>",
+    ">>>>>>> REPLACE",
+  ].join("\n");
+  const BAD_PATCH = [
+    "<<<<<<< SEARCH",
+    "<h1>不存在的标题</h1>",
+    "=======",
+    "<h1>新标题</h1>",
+    ">>>>>>> REPLACE",
+  ].join("\n");
+
+  /** modify SOP 专用 mock：patch 队列 + 反馈捕获 */
+  function makeModifyExecutors(overrides?: {
+    patchTexts?: string[];
+    verifyResults?: VerifyResult[];
+  }) {
+    const calls: string[] = [];
+    const feedbacks: Array<string | undefined> = [];
+    const patchQueue = [...(overrides?.patchTexts ?? [GOOD_PATCH])];
+    const verifyQueue = [...(overrides?.verifyResults ?? [VERIFY_OK])];
+    const executors: Executors = {
+      clarify: async () => READY_CLARIFY,
+      spec: async () => SPEC,
+      generate: async () => GENERATED,
+      verify: async () => {
+        calls.push("verify");
+        return verifyQueue.length > 1 ? verifyQueue.shift()! : verifyQueue[0];
+      },
+      locate: async (input) => {
+        calls.push("locate");
+        return { ...LOCATE, intent: input };
+      },
+      patch: async (_locate, _files, feedback) => {
+        calls.push("patch");
+        feedbacks.push(feedback);
+        const patchText =
+          patchQueue.length > 1 ? patchQueue.shift()! : patchQueue[0];
+        return { patchText, notes: "mock 补丁" };
+      },
+    };
+    return { executors, calls, feedbacks };
+  }
+
+  it("happy path：locate→patch→apply→verify→done，产物已打补丁且 locate 落 stageOutputs", async () => {
+    const { executors, calls } = makeModifyExecutors();
+    const out = await runSOP(
+      "把标题改成新标题",
+      MODIFY_SOP,
+      executors,
+      undefined,
+      undefined,
+      undefined,
+      BASE_FILES,
+    );
+
+    expect(out.finalState).toBe("done");
+    expect(calls).toEqual(["locate", "patch", "verify"]);
+    expect(out.result?.files[0].content).toContain("<h1>新标题</h1>");
+    expect(out.result?.files[0].content).not.toContain("旧标题");
+    // locate 产物随 stageOutputs 带出（落库供排查）
+    expect(out.stageOutputs?.locate).toBeDefined();
+  });
+
+  it("apply 失败（SEARCH 块未命中）→ 带反馈回 patch 重试 → 成功", async () => {
+    const { executors, calls, feedbacks } = makeModifyExecutors({
+      patchTexts: [BAD_PATCH, GOOD_PATCH],
+    });
+    const out = await runSOP(
+      "把标题改成新标题",
+      MODIFY_SOP,
+      executors,
+      undefined,
+      undefined,
+      undefined,
+      BASE_FILES,
+    );
+
+    expect(out.finalState).toBe("done");
+    expect(calls).toEqual(["locate", "patch", "patch", "verify"]);
+    // 第二次 patch 收到 apply 失败反馈（三级匹配均未命中）
+    expect(feedbacks[0]).toBeUndefined();
+    expect(feedbacks[1]).toContain("未找到匹配");
+    expect(out.result?.files[0].content).toContain("<h1>新标题</h1>");
+  });
+
+  it("verify 失败 → 回 patch 重写补丁（反馈含校验错误）", async () => {
+    const { executors, calls, feedbacks } = makeModifyExecutors({
+      verifyResults: [VERIFY_FAIL, VERIFY_OK],
+    });
+    const out = await runSOP(
+      "把标题改成新标题",
+      MODIFY_SOP,
+      executors,
+      undefined,
+      undefined,
+      undefined,
+      BASE_FILES,
+    );
+
+    expect(out.finalState).toBe("done");
+    expect(calls).toEqual(["locate", "patch", "verify", "patch", "verify"]);
+    expect(feedbacks[1]).toContain("mock 语法错误");
+  });
+
+  it("no-op 补丁（内容未变）→ 视为失败重试，反馈指明无实际修改", async () => {
+    const NOOP_PATCH = [
+      "<<<<<<< SEARCH",
+      "<h1>旧标题</h1>",
+      "=======",
+      "<h1>旧标题</h1>",
+      ">>>>>>> REPLACE",
+    ].join("\n");
+    const { executors, feedbacks } = makeModifyExecutors({
+      patchTexts: [NOOP_PATCH, GOOD_PATCH],
+    });
+    const out = await runSOP(
+      "把标题改成新标题",
+      MODIFY_SOP,
+      executors,
+      undefined,
+      undefined,
+      undefined,
+      BASE_FILES,
+    );
+
+    expect(out.finalState).toBe("done");
+    expect(feedbacks[1]).toContain("未产生任何实际修改");
+  });
+
+  it("重试次数用尽 → fail 且无新产物（旧版本保留由路由层兜底）", async () => {
+    const { executors, calls } = makeModifyExecutors({
+      patchTexts: [BAD_PATCH],
+    });
+    const out = await runSOP(
+      "把标题改成新标题",
+      MODIFY_SOP,
+      executors,
+      undefined,
+      undefined,
+      undefined,
+      BASE_FILES,
+    );
+
+    expect(out.finalState).toBe("fail");
+    expect(out.reason).toBe("verify_failed");
+    // 首次 patch + 4 次重试（MAX_FIX_ATTEMPTS=5，第 5 次 fix 判定用尽）
+    expect(calls.filter((c) => c === "patch")).toHaveLength(5);
+    expect(out.result).toBeUndefined();
+  });
+
+  it("modify SOP 无 approve/clarify/spec 步骤（修改不重新确认规格）", () => {
+    const actions = MODIFY_SOP.steps.map((s) => s.action);
+    expect(actions).not.toContain("approve");
+    expect(actions).not.toContain("clarify");
+    expect(actions).not.toContain("spec");
   });
 });

@@ -301,8 +301,11 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）
-        const sop = selectSOP(input);
+        // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）；
+        // 有现有代码（对话迭代）→ modify 增量修改小循环
+        const sop = selectSOP(input, {
+          hasCurrentCode: Boolean(currentFiles?.length),
+        });
         sopId = sop.id;
 
         // 本次运行的角色实例（记忆隔离）+ 共享 Memory 的 LLM 执行器；

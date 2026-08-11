@@ -2,9 +2,16 @@ import type {
   ClarifyOutput,
   File,
   GenerateOutput,
+  LocateOutput,
   SpecOutput,
   VerifyResult,
 } from "../schemas";
+
+/** patch 步骤输出：SEARCH/REPLACE 补丁文本（由 apply 步骤确定性应用） */
+export interface PatchOutput {
+  patchText: string;
+  notes: string;
+}
 
 /** 流水线状态 */
 export type PipelineState =
@@ -51,6 +58,23 @@ export interface Executors {
    *   缺省为完整单文件 HTML 校验
    */
   verify: (files: File[], stage?: string) => Promise<VerifyResult>;
+  /**
+   * 改动定位（modify SOP）：读现有代码 + 修改意图，输出改动点锚点。
+   * 把"在哪里改"从补丁生成里拆出来，降低 SEARCH 块不匹配率。
+   */
+  locate: (input: string, currentFiles: File[]) => Promise<LocateOutput>;
+  /**
+   * 补丁生成（modify SOP）：基于 locate 锚点生成 SEARCH/REPLACE 补丁，
+   * 由引擎的 apply 步骤确定性应用。
+   * @param feedback - 上一轮 apply/verify 失败详情（重试回路）
+   * @param attempt - 当前重试轮次（0 表示首次）
+   */
+  patch: (
+    locate: LocateOutput,
+    currentFiles: File[],
+    feedback?: string,
+    attempt?: number,
+  ) => Promise<PatchOutput>;
 }
 
 /** approve 节点决策（骨架阶段由调用方注入，默认自动通过） */

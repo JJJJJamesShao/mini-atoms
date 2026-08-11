@@ -185,11 +185,12 @@ export async function POST(req: NextRequest) {
             pushProcessLog(stage, "start", event.role);
             break;
           case "agent:complete": {
-            // verify 系（含 verify-schema/verify-shell/verify-pages）未通过时
-            // 阶段记为 failed（与前端 useWorkspace 的 startsWith 判定一致）
+            // verify 系（含 verify-schema/verify-shell/verify-pages）与 apply
+            // 未通过时阶段记为 failed（与前端 useWorkspace 的判定一致）
             const out = event.output as { pass?: boolean } | undefined;
             const status =
-              stage.startsWith("verify") && out?.pass === false
+              (stage.startsWith("verify") || stage === "apply") &&
+              out?.pass === false
                 ? "failed"
                 : "done";
             stageStates.set(stage, {
@@ -301,8 +302,11 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）
-        const sop = selectSOP(input);
+        // SOP 路由：按输入关键词选择流程（game 精简流程跳过 approve）；
+        // 有现有代码（对话迭代）→ modify 增量修改小循环
+        const sop = selectSOP(input, {
+          hasCurrentCode: Boolean(currentFiles?.length),
+        });
         sopId = sop.id;
 
         // 本次运行的角色实例（记忆隔离）+ 共享 Memory 的 LLM 执行器；

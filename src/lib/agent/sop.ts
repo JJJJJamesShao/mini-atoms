@@ -20,6 +20,9 @@ export type SOPAction =
   | "verify"
   | "fix"
   | "merge"
+  | "locate"
+  | "patch"
+  | "apply"
   | "done"
   | "fail";
 
@@ -337,10 +340,69 @@ export const FULLSTACK_SOP: SOPConfig = {
   ],
 };
 
+/**
+ * 代码修改：基于现有代码的增量修改小循环（用户主动修改专用）。
+ *
+ * 设计要点：
+ * - 只有 locate/patch 两步调 LLM；apply/verify 是确定性护栏（零 LLM）；
+ * - locate 把"在哪里改"从补丁生成里拆出来，降低 SEARCH 块不匹配率；
+ * - apply 失败（块不匹配/多候选/无实际改动）→ fix-patch 带反馈回 patch 重试；
+ *   verify 失败同样回 patch（补丁重写，而非基于坏产物继续打补丁）；
+ * - 每次重试都基于原始代码重新生成补丁并应用（不在半成品上叠加）；
+ * - 无 approve 门：修改是对既有规格的增量，不需要重新确认；
+ * - 重试次数用尽 → fail 保留旧版本（v1 砍掉自动回退完整重写——最贵且曾
+ *   引发 300s 超时误杀的路径），用户可重新发起修改。
+ */
+export const MODIFY_SOP: SOPConfig = {
+  id: "modify",
+  name: "代码修改",
+  description: "基于现有代码的增量修改小循环（locate→patch→apply→verify）",
+  steps: [
+    { name: "locate", role: "architect", action: "locate", next: "patch" },
+    { name: "patch", role: "engineer", action: "patch", next: "apply" },
+    {
+      name: "apply",
+      role: "system",
+      action: "apply",
+      next: {
+        default: "verify",
+        conditions: [
+          { field: "pass", operator: "eq", value: "false", then: "fix-patch" },
+        ],
+      },
+    },
+    {
+      name: "verify",
+      role: "reviewer",
+      action: "verify",
+      next: {
+        default: "done",
+        conditions: [
+          { field: "pass", operator: "eq", value: "false", then: "fix-patch" },
+        ],
+      },
+    },
+    {
+      name: "fix-patch",
+      role: "engineer",
+      action: "fix",
+      next: {
+        default: "patch",
+        conditions: [
+          { field: "exhausted", operator: "eq", value: "true", then: "fail" },
+        ],
+      },
+    },
+    { name: "done", role: "system", action: "done", next: "" },
+    { name: "fail", role: "system", action: "fail", next: "" },
+  ],
+};
+
 /** SOP 注册表：tool 复用 web-app 完整流程 */
 export const SOP_REGISTRY = new Map<string, SOPConfig>([
   ["web-app", DEFAULT_SOP],
   ["game", GAME_SOP],
   ["tool", DEFAULT_SOP],
   ["fullstack-app", FULLSTACK_SOP],
+  ["modify", MODIFY_SOP],
 ]);

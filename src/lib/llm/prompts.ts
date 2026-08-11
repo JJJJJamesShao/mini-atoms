@@ -1,4 +1,9 @@
-import type { File, SpecOutput, VerifyResult } from "@/lib/schemas";
+import type {
+  File,
+  LocateOutput,
+  SpecOutput,
+  VerifyResult,
+} from "@/lib/schemas";
 
 // ===== 核心 System Prompt（深度调优版） =====
 
@@ -579,33 +584,37 @@ ${formatErrorsForLLM(errors)}
   ];
 }
 
-// --- follow-up 节点（对话迭代：基于现有代码修改） ---
+// --- modify SOP：locate 节点（改动定位，快模型） ---
 
-const SYSTEM_FOLLOW_UP = `你是一位前端工程师，收到了一份现有代码和用户的修改需求。
+const SYSTEM_LOCATE = `你是一位资深架构师，擅长阅读现有代码并精确定位改动点。
 
-**你的任务**：基于现有代码进行精确修改，只改动需求相关的部分，保持其他代码完全不变。
+**你的任务**：根据用户的修改需求，在现有代码中找出所有需要改动的位置，输出结构化的改动点锚点。
 
 **重要规则**：
-1. 使用 Search/Replace 格式输出修改指令
-2. SEARCH 块必须精确匹配原始代码（包括空格、缩进、换行）
-3. 只修改与需求相关的代码，不要改动无关部分
-4. 不要输出任何解释文字，只输出 SEARCH/REPLACE 块
-5. 确保修改后的代码完整可运行
+1. 只输出 JSON，不要输出任何解释文字
+2. searchHint 必须是现有代码中**逐字存在**的片段（含空格缩进），足够短且能唯一定位改动点附近（建议 5~80 字符）
+3. anchors 只覆盖与需求相关的改动点，不要列入无关位置
+4. 如果需求需要新增功能，锚点指向最合适的插入位置
 
-## 输出格式（Search/Replace）
+## 输出格式（严格 JSON）
 
-<<<<<<< SEARCH
-[要替换的原始代码]
-=======
-[新代码]
->>>>>>> REPLACE`;
+{
+  "intent": "修改意图的一句话概括",
+  "anchors": [
+    {
+      "id": "anchor-1",
+      "description": "改动点描述（如：导航栏主题色 CSS 变量）",
+      "searchHint": "现有代码中逐字存在的定位片段"
+    }
+  ]
+}`;
 
-export function buildFollowUpPrompt(
+export function buildLocatePrompt(
   currentHtml: string,
   request: string,
 ): Array<{ role: "system" | "user"; content: string }> {
   return [
-    { role: "system" as const, content: SYSTEM_FOLLOW_UP },
+    { role: "system" as const, content: SYSTEM_LOCATE },
     {
       role: "user" as const,
       content: `现有代码（${currentHtml.length} 字符）：
@@ -616,8 +625,76 @@ ${currentHtml}
 
 修改需求：${request}
 
-请基于现有代码，使用 Search/Replace 格式输出修改指令。只修改与需求相关的部分。`,
+请输出改动点锚点 JSON。`,
     },
+  ];
+}
+
+// --- modify SOP：patch 节点（补丁生成，强模型） ---
+
+const SYSTEM_MODIFY_PATCH = `你是一位前端工程师，擅长基于改动定位进行精确的增量代码修改。
+
+**你的任务**：根据架构师给出的改动点锚点，使用 Search/Replace 格式输出修改指令。
+
+## 输出格式（严格 Search/Replace）
+
+每个修改使用如下格式：
+
+<<<<<<< SEARCH
+[要替换的原始代码，必须精确匹配文件中的内容]
+=======
+[修改后的新代码]
+>>>>>>> REPLACE
+
+**重要规则**：
+1. SEARCH 块必须精确匹配原始代码（包括空格、缩进、换行）
+2. 优先围绕改动点锚点生成补丁；锚点是聚焦提示而非唯一依据，锚点跑偏时以完整代码为准自行定位
+3. 可以有多个 SEARCH/REPLACE 块，按顺序应用
+4. 只修改与需求相关的代码，保持其他代码完全不变
+5. 不要输出任何解释文字，只输出 SEARCH/REPLACE 块
+6. 确保修改后的代码完整可运行`;
+
+export function buildModifyPatchPrompt(
+  currentHtml: string,
+  locate: LocateOutput,
+  feedback?: string,
+): Array<{ role: "system" | "user"; content: string }> {
+  const anchorsText = locate.anchors
+    .map(
+      (a) =>
+        `- [${a.id}] ${a.description}\n  定位片段：${JSON.stringify(a.searchHint)}`,
+    )
+    .join("\n");
+
+  let userContent = `现有代码（${currentHtml.length} 字符）：
+
+${currentHtml}
+
+---
+
+修改意图：${locate.intent}
+
+改动点锚点：
+${anchorsText}`;
+
+  if (feedback) {
+    userContent += `
+
+---
+
+上一轮补丁应用/校验反馈：
+${feedback}
+
+请根据反馈修正后重新输出补丁。`;
+  }
+
+  userContent += `
+
+请使用 Search/Replace 格式输出修改指令。`;
+
+  return [
+    { role: "system" as const, content: SYSTEM_MODIFY_PATCH },
+    { role: "user" as const, content: userContent },
   ];
 }
 

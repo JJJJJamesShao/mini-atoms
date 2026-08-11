@@ -42,6 +42,8 @@ function makeExecutors(): Executors {
     spec: async () => SPEC,
     generate: async () => GENERATED,
     verify: async () => VERIFY_OK,
+    locate: async (input) => ({ intent: input, anchors: [] }),
+    patch: async (locate) => ({ patchText: "", notes: locate.intent }),
   };
 }
 
@@ -77,8 +79,16 @@ describe("TypedEventBus Topic 路由", () => {
 
   it("queryHistory 按 sessionId 隔离", () => {
     const bus = new AgentEventBus();
-    bus.publish(MessageTopic.PRD, { from: "pm", payload: "a", sessionId: "s1" });
-    bus.publish(MessageTopic.PRD, { from: "pm", payload: "b", sessionId: "s2" });
+    bus.publish(MessageTopic.PRD, {
+      from: "pm",
+      payload: "a",
+      sessionId: "s1",
+    });
+    bus.publish(MessageTopic.PRD, {
+      from: "pm",
+      payload: "b",
+      sessionId: "s2",
+    });
 
     expect(bus.queryHistory(MessageTopic.PRD, "s1")).toHaveLength(1);
     expect(bus.queryHistory(MessageTopic.PRD, "s2")).toHaveLength(1);
@@ -152,8 +162,16 @@ describe("Role Memory 隔离", () => {
 
   it("prepareContext：架构师只消费 PRD，拿不到 CODE", () => {
     const bus = new AgentEventBus();
-    bus.publish(MessageTopic.PRD, { from: "产品经理", payload: { s: 1 }, sessionId: "s1" });
-    bus.publish(MessageTopic.CODE, { from: "前端工程师", payload: { c: 1 }, sessionId: "s1" });
+    bus.publish(MessageTopic.PRD, {
+      from: "产品经理",
+      payload: { s: 1 },
+      sessionId: "s1",
+    });
+    bus.publish(MessageTopic.CODE, {
+      from: "前端工程师",
+      payload: { c: 1 },
+      sessionId: "s1",
+    });
 
     const architect = new Role(ROLES.architect.config);
     architect.prepareContext(bus, "s1");
@@ -170,11 +188,22 @@ describe("runSOP × Topic 消息池", () => {
   it("步骤产物按 Topic 发布：clarify→PRD、spec→ARCH_SPEC、generate→CODE、verify→REVIEW", async () => {
     const bus = new AgentEventBus();
     const published: TypedMessage[] = [];
-    for (const topic of [MessageTopic.PRD, MessageTopic.ARCH_SPEC, MessageTopic.CODE, MessageTopic.REVIEW]) {
+    for (const topic of [
+      MessageTopic.PRD,
+      MessageTopic.ARCH_SPEC,
+      MessageTopic.CODE,
+      MessageTopic.REVIEW,
+    ]) {
       bus.subscribeTopic(topic, (m) => published.push(m));
     }
 
-    const out = await runSOP("做一个电商网站", DEFAULT_SOP, makeExecutors(), async () => true, bus);
+    const out = await runSOP(
+      "做一个电商网站",
+      DEFAULT_SOP,
+      makeExecutors(),
+      async () => true,
+      bus,
+    );
 
     expect(out.finalState).toBe("done");
     const topics = published.map((m) => m.topic);
@@ -194,10 +223,19 @@ describe("runSOP × Topic 消息池", () => {
   it("记忆链路：架构师执行后其 Memory 中含 PRD 历史", async () => {
     const bus = new AgentEventBus();
     const roles = createRoles();
-    await runSOP("做一个数独游戏", GAME_SOP, makeExecutors(), undefined, bus, roles);
+    await runSOP(
+      "做一个数独游戏",
+      GAME_SOP,
+      makeExecutors(),
+      undefined,
+      bus,
+      roles,
+    );
 
     // 架构师在 spec 步骤前 prepareContext，消费了 PM 发布的 PRD
-    expect(roles.architect.memory.query(MessageTopic.PRD).length).toBeGreaterThan(0);
+    expect(
+      roles.architect.memory.query(MessageTopic.PRD).length,
+    ).toBeGreaterThan(0);
   });
 });
 
@@ -206,8 +244,18 @@ describe("runSOP × Topic 消息池", () => {
 describe("CodeArtifact 结构化输出", () => {
   const validJson = JSON.stringify({
     files: [
-      { path: "index.html", type: "html", content: "<!DOCTYPE html><html></html>", dependencies: [] },
-      { path: "game.js", type: "js", content: "console.log(1)", dependencies: [] },
+      {
+        path: "index.html",
+        type: "html",
+        content: "<!DOCTYPE html><html></html>",
+        dependencies: [],
+      },
+      {
+        path: "game.js",
+        type: "js",
+        content: "console.log(1)",
+        dependencies: [],
+      },
     ],
     metadata: { framework: null, externalDeps: [] },
     notes: "游戏说明",
@@ -231,7 +279,9 @@ describe("CodeArtifact 结构化输出", () => {
     expect(parseCodeArtifact('{"files":[]}')).toBeNull();
     expect(
       parseCodeArtifact(
-        JSON.stringify({ files: [{ path: "a.py", type: "python", content: "" }] }),
+        JSON.stringify({
+          files: [{ path: "a.py", type: "python", content: "" }],
+        }),
       ),
     ).toBeNull();
   });

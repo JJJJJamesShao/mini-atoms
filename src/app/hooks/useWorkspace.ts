@@ -17,6 +17,9 @@ export const STAGE_ORDER = [
   "generate-pages",
   "verify-pages",
   "merge",
+  "locate",
+  "patch",
+  "apply",
   "verify",
   "done",
 ] as const;
@@ -343,8 +346,12 @@ export function useWorkspace() {
               );
             } else if (agentStage === "generate") {
               setStage("generate", "done", ae.message ?? "代码已生成");
-            } else if (agentStage.startsWith("verify")) {
-              // verify / verify-schema / verify-shell / verify-pages
+            } else if (
+              agentStage.startsWith("verify") ||
+              agentStage === "apply"
+            ) {
+              // verify / verify-schema / verify-shell / verify-pages / apply：
+              // 输出带 pass 字段，未通过记为 failed
               const out = ae.output as { pass?: boolean } | undefined;
               setStage(
                 agentStage,
@@ -360,7 +367,11 @@ export function useWorkspace() {
 
           if (
             (ae.type === "agent:thinking" || ae.type === "agent:progress") &&
-            agentStage.startsWith("generate")
+            // generate 系 + modify SOP 的 locate/patch/apply 都有流式进度事件
+            (agentStage.startsWith("generate") ||
+              agentStage === "locate" ||
+              agentStage === "patch" ||
+              agentStage === "apply")
           ) {
             const msg =
               ae.message ||

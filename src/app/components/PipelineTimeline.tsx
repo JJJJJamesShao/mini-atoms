@@ -14,6 +14,9 @@ const STAGE_LABELS: Record<StageName, string> = {
   "generate-pages": "页面实现生成",
   "verify-pages": "页面校验",
   merge: "合并整合",
+  locate: "改动定位",
+  patch: "补丁生成",
+  apply: "补丁应用",
   verify: "校验",
   done: "完成",
 };

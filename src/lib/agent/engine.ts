@@ -9,15 +9,17 @@
  */
 
 import type { File } from "../schemas";
-import type { Executors, Approver } from "./index";
+import type { Executors, Approver, PatchOutput } from "./index";
 import type { AgentEventBus } from "./bus";
 import { createRoles, ROLES, type Role, type RoleId } from "./role";
 import { MessageTopic } from "./message";
 import { mergeFullstack, findMissingPages } from "./merge";
+import { applyPatch, formatPatchFeedback, parsePatch } from "./patch";
 import type { SOPCondition, SOPConfig, SOPStep } from "./sop";
 import type {
   ClarifyOutput,
   GenerateOutput,
+  LocateOutput,
   SpecOutput,
   VerifyResult,
 } from "../schemas";
@@ -36,8 +38,9 @@ export interface SOPRunResult {
   questions?: string[];
   /** finalState 为 done 时的生成产物 */
   result?: GenerateOutput;
-  /** 多阶段 SOP 的中间产物（schema/shell/pages 原始代码，落库供排查与回放） */
-  stageOutputs?: Record<string, GenerateOutput>;
+  /** 多阶段 SOP 的中间产物（schema/shell/pages 原始代码，落库供排查与回放）；
+   *  modify SOP 的 locate 改动定位产物也存于此 */
+  stageOutputs?: Record<string, GenerateOutput | LocateOutput>;
 }
 
 /** 跨步骤共享的执行上下文 */
@@ -50,8 +53,15 @@ interface ExecutionContext {
   fixAttempts: number;
   /** 对话迭代时传入的初始代码 */
   initialFiles?: File[];
-  /** 多阶段 SOP：各阶段产物（generate-X 步骤名 → 输出） */
-  stageOutputs: Record<string, GenerateOutput>;
+  /** 多阶段 SOP：各阶段产物（generate-X 步骤名 → 输出）；
+   *  modify SOP：key "locate" 存改动定位产物 */
+  stageOutputs: Record<string, GenerateOutput | LocateOutput>;
+  /** modify SOP：locate 步骤的改动定位产物 */
+  locate: LocateOutput | null;
+  /** modify SOP：patch 步骤的最新补丁产物 */
+  patchOutput: PatchOutput | null;
+  /** modify SOP：apply/verify 失败详情，作为下一轮 patch 的反馈 */
+  patchFeedback: string | undefined;
 }
 
 /**
@@ -63,6 +73,15 @@ function stageOfStep(stepName: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
+/** 从 stageOutputs 取生成产物（modify SOP 的 "locate" 键是 LocateOutput，需收窄） */
+function stageGenerateOutput(
+  ctx: ExecutionContext,
+  key: string,
+): GenerateOutput | undefined {
+  const out = ctx.stageOutputs[key];
+  return out && "files" in out ? out : undefined;
+}
+
 /** 多阶段 SOP：当前阶段生成时作为输入的前置产物 */
 function stageInputFiles(
   ctx: ExecutionContext,
@@ -72,11 +91,11 @@ function stageInputFiles(
     case "schema":
       return ctx.initialFiles;
     case "shell":
-      return ctx.stageOutputs["schema"]?.files;
+      return stageGenerateOutput(ctx, "schema")?.files;
     case "pages":
       return [
-        ...(ctx.stageOutputs["schema"]?.files ?? []),
-        ...(ctx.stageOutputs["shell"]?.files ?? []),
+        ...(stageGenerateOutput(ctx, "schema")?.files ?? []),
+        ...(stageGenerateOutput(ctx, "shell")?.files ?? []),
       ];
     default:
       return ctx.initialFiles ?? ctx.generated?.files;
@@ -109,6 +128,9 @@ export async function runSOP(
     fixAttempts: 0,
     initialFiles,
     stageOutputs: {},
+    locate: null,
+    patchOutput: null,
+    patchFeedback: undefined,
   };
 
   let current: string | undefined = sop.steps[0]?.name;
@@ -212,9 +234,12 @@ function stepToTopic(step: SOPStep): MessageTopic {
     case "clarify":
       return MessageTopic.PRD;
     case "spec":
+    case "locate":
       return MessageTopic.ARCH_SPEC;
     case "generate":
     case "merge":
+    case "patch":
+    case "apply":
       return MessageTopic.CODE;
     case "verify":
       return MessageTopic.REVIEW;
@@ -285,7 +310,7 @@ async function executeStep(
       // （最终 verify 失败回 generate-pages 时 ctx.generated 已是 merge 产物，
       // 直接用它会把 index.html 当成 pages 上下文，契约错位）
       const currentFiles = ctx.lastErrors?.length
-        ? ((stage ? ctx.stageOutputs[stage]?.files : undefined) ??
+        ? ((stage ? stageGenerateOutput(ctx, stage)?.files : undefined) ??
           ctx.generated?.files ??
           stageInputFiles(ctx, stage))
         : stageInputFiles(ctx, stage);
@@ -306,13 +331,86 @@ async function executeStep(
       const out = await executors.verify(ctx.generated.files, stage);
       // 多阶段 SOP 必须清理：上一阶段的错误不能污染下一阶段（否则误判为 fix 模式）
       ctx.lastErrors = out.pass ? undefined : out.errors;
+      // modify SOP：verify 失败详情作为下一轮 patch 的反馈（补丁重写回路）
+      ctx.patchFeedback = out.pass
+        ? undefined
+        : out.errors
+            .map((e, i) => `[错误 ${i + 1}] ${e.rule}：${e.message}`)
+            .join("\n");
       return out;
+    }
+    case "locate": {
+      // modify SOP：改动定位（架构师，快模型）
+      const out = await executors.locate(ctx.input, ctx.initialFiles ?? []);
+      ctx.locate = out;
+      // 定位产物落 stageOutputs（随版本落库，供排查与回放）
+      ctx.stageOutputs["locate"] = out;
+      return out;
+    }
+    case "patch": {
+      // modify SOP：补丁生成（工程师，强模型）。
+      // 重试始终基于原始代码（ctx.initialFiles），不在半成品上叠加
+      if (!ctx.locate) throw new Error("patch 步骤缺少 locate 产物");
+      const out = await executors.patch(
+        ctx.locate,
+        ctx.initialFiles ?? [],
+        ctx.patchFeedback,
+        ctx.fixAttempts,
+      );
+      ctx.patchOutput = out;
+      return out;
+    }
+    case "apply": {
+      // modify SOP：确定性补丁应用（零 LLM，与 merge 同为 system 动作）。
+      // 基于原始代码应用最新补丁；失败详情写入 patchFeedback 供重试
+      if (!ctx.patchOutput) throw new Error("apply 步骤缺少 patch 产物");
+      const base = ctx.initialFiles?.[0]?.content ?? "";
+      const blocks = parsePatch(ctx.patchOutput.patchText);
+      bus?.emit({
+        type: "agent:start",
+        agent: step.name,
+        role: roleName,
+        message: `应用 ${blocks.length} 个补丁块`,
+      });
+      const applied = applyPatch(base, blocks);
+      // no-op 检测：全部块应用成功但内容未变 → 视为失败进重试
+      const noOp = applied.success && applied.newContent === base;
+      const pass = applied.success && !noOp;
+      // 改动范围警告（v1 只告警不拒绝；锚点级范围校验留 v2）
+      const changedChars = blocks
+        .filter((_, i) => applied.details[i]?.status === "applied")
+        .reduce((n, b) => n + b.search.length, 0);
+      const changeRatio = base.length > 0 ? changedChars / base.length : 0;
+
+      if (pass) {
+        ctx.generated = {
+          files: [{ path: "index.html", content: applied.newContent }],
+          notes: `补丁应用成功：${applied.applied} 个块，代码 ${base.length} → ${applied.newContent.length} 字符`,
+        };
+        ctx.lastErrors = undefined;
+        ctx.patchFeedback = undefined;
+      } else {
+        ctx.patchFeedback = noOp
+          ? "补丁未产生任何实际修改，请确认 SEARCH/REPLACE 块的内容有实质差异。"
+          : formatPatchFeedback(applied);
+      }
+
+      bus?.emit({
+        type: "agent:complete",
+        agent: step.name,
+        role: roleName,
+        output: { pass, applied: applied.applied, failed: applied.failed },
+        message: pass
+          ? `补丁应用成功（${applied.applied} 个块${changeRatio > 0.5 ? "，⚠️ 改动范围超过 50%" : ""}）`
+          : `补丁应用失败：${applied.failed} 个块未命中${noOp ? " / 无实际修改" : ""}，转入重试`,
+      });
+      return { pass, applied: applied.applied, failed: applied.failed };
     }
     case "merge": {
       // 确定性合并（零 LLM）：schema + shell + pages → index.html
-      const schema = ctx.stageOutputs["schema"];
-      const shell = ctx.stageOutputs["shell"];
-      const pages = ctx.stageOutputs["pages"];
+      const schema = stageGenerateOutput(ctx, "schema");
+      const shell = stageGenerateOutput(ctx, "shell");
+      const pages = stageGenerateOutput(ctx, "pages");
       if (!schema || !shell || !pages) {
         throw new Error("merge 步骤缺少阶段产物（schema/shell/pages）");
       }
@@ -358,14 +456,17 @@ async function executeStep(
       return { ...out, missingPages };
     }
     case "fix": {
-      // fix 不调用执行器：记录次数并回退到 generate 重新生成。
-      // 事件挂到对应的 generate 阶段卡片上（fix-schema → generate-schema），
+      // fix 不调用执行器：记录次数并回退到对应的生成/补丁步骤重试。
+      // 事件挂到目标阶段卡片上（fix-schema → generate-schema，fix-patch → patch），
       // fix 是内部步骤，不在前端阶段列表中展示
       ctx.fixAttempts += 1;
       const exhausted = ctx.fixAttempts >= MAX_FIX_ATTEMPTS;
       bus?.emit({
         type: "agent:thinking",
-        agent: step.name.replace(/^fix($|-)/, "generate$1"),
+        agent:
+          step.name === "fix-patch"
+            ? "patch"
+            : step.name.replace(/^fix($|-)/, "generate$1"),
         role: ROLES.engineer.config.name,
         message: exhausted
           ? "修复次数用尽"

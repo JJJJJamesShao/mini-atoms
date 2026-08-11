@@ -11,9 +11,15 @@ import {
   buildClarifyPrompt,
   buildGameGeneratePrompt,
   buildGeneratePrompt,
+  buildLocatePrompt,
+  buildModifyPatchPrompt,
   buildSpecPrompt,
 } from "../src/lib/llm/prompts";
-import type { ClarifyOutput, SpecOutput } from "../src/lib/schemas";
+import type {
+  ClarifyOutput,
+  LocateOutput,
+  SpecOutput,
+} from "../src/lib/schemas";
 
 const SPEC: SpecOutput = {
   requirements: ["r1"],
@@ -106,5 +112,64 @@ describe("prompt 输出契约", () => {
     const all = messages.map((m) => m.content).join("\n");
     expect(all).toContain("JSON");
     expect(all).not.toContain("<<<<<<< SEARCH");
+  });
+});
+
+describe("modify SOP prompt 输出契约", () => {
+  const LOCATE: LocateOutput = {
+    intent: "把主题色改为暗色",
+    anchors: [
+      {
+        id: "anchor-1",
+        description: "主题色 CSS 变量",
+        searchHint: "--primary: #3b82f6",
+      },
+    ],
+  };
+
+  it("SYSTEM_LOCATE 必须要求 intent/anchors/searchHint 字段（LocateOutput schema 依赖）", () => {
+    const system = buildLocatePrompt("<html></html>", "改主题色")[0].content;
+    expect(system).toContain('"intent"');
+    expect(system).toContain('"anchors"');
+    expect(system).toContain('"searchHint"');
+    expect(system).toContain('"description"');
+  });
+
+  it("SYSTEM_LOCATE 必须强调 searchHint 逐字取自现有代码（applyPatch 精确匹配依赖）", () => {
+    const system = buildLocatePrompt("<html></html>", "改主题色")[0].content;
+    expect(system).toContain("逐字");
+  });
+
+  it("buildLocatePrompt user 消息必须携带现有代码与修改需求", () => {
+    const messages = buildLocatePrompt(
+      "<body>旧代码</body>",
+      "把主题色改成暗色",
+    );
+    expect(messages[1].content).toContain("旧代码");
+    expect(messages[1].content).toContain("把主题色改成暗色");
+  });
+
+  it("SYSTEM_MODIFY_PATCH 必须使用 Search/Replace 格式且禁止解释文字", () => {
+    const system = buildModifyPatchPrompt("<html></html>", LOCATE)[0].content;
+    expect(system).toContain("<<<<<<< SEARCH");
+    expect(system).toContain(">>>>>>> REPLACE");
+    expect(system).toContain("不要输出任何解释文字");
+  });
+
+  it("buildModifyPatchPrompt user 消息必须携带意图与锚点", () => {
+    const messages = buildModifyPatchPrompt("<html></html>", LOCATE);
+    expect(messages[1].content).toContain("把主题色改为暗色");
+    expect(messages[1].content).toContain("anchor-1");
+    expect(messages[1].content).toContain("--primary: #3b82f6");
+  });
+
+  it("buildModifyPatchPrompt 携带反馈时必须包含反馈内容（重试回路依赖）", () => {
+    const messages = buildModifyPatchPrompt(
+      "<html></html>",
+      LOCATE,
+      "块 #1 失败：SEARCH 块未找到匹配",
+    );
+    expect(messages[1].content).toContain("上一轮补丁应用/校验反馈");
+    expect(messages[1].content).toContain("块 #1 失败");
   });
 });

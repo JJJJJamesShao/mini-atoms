@@ -1,14 +1,20 @@
-import type { Executors } from "../agent";
-import type { ClarifyOutput, GenerateOutput, SpecOutput } from "../schemas";
+import type { Executors, PatchOutput } from "../agent";
+import type {
+  ClarifyOutput,
+  GenerateOutput,
+  LocateOutput,
+  SpecOutput,
+} from "../schemas";
 import type OpenAI from "openai";
 import { streamChat, streamGLM } from "@/lib/llm/client";
 import { collectStreamText, throttleByChars } from "@/lib/llm/stream";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
-  buildFollowUpPrompt,
   buildGameGeneratePrompt,
   buildGeneratePrompt,
+  buildLocatePrompt,
+  buildModifyPatchPrompt,
   buildPatchPrompt,
   buildSpecPrompt,
   buildStagePrompt,
@@ -48,17 +54,20 @@ const SUMMARY_STREAM_TIMEOUTS = {
 /**
  * generate 系路径统一流式收集入口：超时档位 + 节流进度事件。
  * 此前 stage/follow-up/patch 三处逐字复制同一段"每 2000 字符 emit"模板。
+ * @param intervalChars - 进度事件节流间隔（字符）；补丁类小输出用 300，
+ *   全量生成用默认 2000
  */
 async function collectGenerateStream(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   bus: AgentEventBus | undefined,
   agentName: string,
   messageFor: (accLength: number) => string,
+  intervalChars = 2000,
 ): Promise<string> {
   return collectStreamText(
     stream,
     GENERATE_STREAM_TIMEOUTS,
-    throttleByChars(2000, (acc) => {
+    throttleByChars(intervalChars, (acc) => {
       bus?.emit({
         type: "agent:progress",
         agent: agentName,
@@ -490,77 +499,9 @@ export function createLLMExecutors(
           return result;
         }
 
-        // === FOLLOW-UP 模式：有当前代码 + 无错误 → 基于现有代码做增量修改 ===
-        if (!isFixMode && hasCurrentCode) {
-          const currentHtml = currentFiles[0].content;
-          bus?.emit({
-            type: "agent:progress",
-            agent: "generate",
-            role: "前端工程师",
-            percent: 10,
-            message: `对话迭代：基于现有代码 ${currentHtml.length} 字符做增量修改...`,
-          });
-
-          const messages = buildFollowUpPrompt(
-            currentHtml,
-            spec.requirements.join("，"),
-          );
-          // 流式 + 超时保护：此前非流式 chat() 被代理挂起 15 分钟才超时（线上事故），
-          // 流式让进度可观测（每 2000 字符 emit 一次），60s 无 chunk 即判失败
-          const patchText = await collectGenerateStream(
-            await streamChat(MODEL_ROUTING.generate, messages),
-            bus,
-            "generate",
-            (len) => `已接收 ${len} 字符修改指令...`,
-          );
-
-          bus?.emit({
-            type: "agent:thinking",
-            agent: "generate",
-            role: "前端工程师",
-            message: `收到修改指令，正在解析并应用...`,
-          });
-
-          const blocks = parsePatch(patchText);
-          const patchResult = applyPatch(currentHtml, blocks);
-
-          if (patchResult.success && patchResult.newContent !== currentHtml) {
-            const newHtml = patchResult.newContent;
-            const result: GenerateOutput = {
-              files: [{ path: "index.html", content: newHtml }],
-              notes: `对话迭代：基于现有代码应用 ${patchResult.applied} 处修改，代码从 ${currentHtml.length} → ${newHtml.length} 字符`,
-            };
-
-            memory.generate.add({
-              topic: MessageTopic.CODE,
-              content: JSON.stringify(result),
-              metadata: { direction: "out" },
-            });
-            bus?.emit({
-              type: "file:generated",
-              agent: "generate",
-              role: "前端工程师",
-              message: `${result.files[0].path}（增量编辑，${newHtml.length} 字符）`,
-              output: { path: result.files[0].path, size: newHtml.length },
-            });
-            emit({
-              type: "agent:complete",
-              agent: "generate",
-              role: "前端工程师",
-              output: result,
-              message: `增量修改完成：${patchResult.applied} 处修改已应用`,
-            });
-            return result;
-          }
-
-          // Follow-up Patch 失败 → 回退到完整重写
-          bus?.emit({
-            type: "agent:thinking",
-            agent: "generate",
-            role: "前端工程师",
-            message: `增量修改未成功，回退到完整重写...`,
-          });
-        }
+        // FOLLOW-UP 模式已移除：用户主动修改由 modify SOP
+        // （locate→patch→apply→verify 小循环）承担，不再寄生在 generate 里。
+        // 此处保留的 PATCH 模式仅服务生成 SOP 内 verify 失败后的 fix 回路。
 
         // === PATCH 模式：校验失败 + 有当前代码 → 精确编辑，避免完整重写 ===
         if (isFixMode && hasCurrentCode) {
@@ -777,6 +718,97 @@ export function createLLMExecutors(
         agent: agentName,
         role: "代码审查员",
         output: result,
+      });
+      return result;
+    },
+
+    // === modify SOP：改动定位（架构师，快模型） ===
+    locate: async (input, currentFiles) => {
+      emit({ type: "agent:start", agent: "locate", role: "架构师", input });
+      const currentHtml = currentFiles[0]?.content ?? "";
+      memory.spec.add({
+        topic: MessageTopic.SYSTEM,
+        content: JSON.stringify({ input, codeLength: currentHtml.length }),
+        metadata: { direction: "in" },
+      });
+      const messages = buildLocatePrompt(currentHtml, input);
+      const text = await collectJsonStream(
+        await streamChat(MODEL_ROUTING.clarify, messages),
+        bus,
+        "locate",
+        "架构师",
+        "改动定位中",
+      );
+      const result = extractJson<LocateOutput>(text);
+      memory.spec.add({
+        topic: MessageTopic.ARCH_SPEC,
+        content: JSON.stringify(result),
+        metadata: { direction: "out" },
+      });
+      emit({
+        type: "agent:complete",
+        agent: "locate",
+        role: "架构师",
+        output: result,
+        message: `定位到 ${result.anchors.length} 个改动点`,
+      });
+      return result;
+    },
+
+    // === modify SOP：补丁生成（工程师，强模型，锚点聚焦 + 反馈重试） ===
+    patch: async (locate, currentFiles, feedback, attempt = 0) => {
+      emit({
+        type: "agent:start",
+        agent: "patch",
+        role: "前端工程师",
+        input: {
+          intent: locate.intent,
+          anchors: locate.anchors.length,
+          attempt,
+        },
+      });
+      const currentHtml = currentFiles[0]?.content ?? "";
+      memory.generate.add({
+        topic: MessageTopic.ARCH_SPEC,
+        content: JSON.stringify(locate),
+        metadata: { direction: "in" },
+      });
+      bus?.emit({
+        type: "agent:progress",
+        agent: "patch",
+        role: "前端工程师",
+        percent: 10,
+        message:
+          attempt > 0
+            ? `第 ${attempt} 次补丁重试：根据反馈修正...`
+            : `基于 ${locate.anchors.length} 个改动点生成补丁（现有代码 ${currentHtml.length} 字符）...`,
+      });
+
+      const messages = buildModifyPatchPrompt(currentHtml, locate, feedback);
+      // 补丁是小输出：300 字符节流让进度动态可见（全量生成路径默认 2000）
+      const patchText = await collectGenerateStream(
+        await streamChat(MODEL_ROUTING.generate, messages),
+        bus,
+        "patch",
+        (len) => `已接收 ${len} 字符补丁...`,
+        300,
+      );
+
+      const result: PatchOutput = {
+        patchText,
+        notes: `补丁生成完成（${patchText.length} 字符${attempt > 0 ? `，第 ${attempt} 次重试` : ""}）`,
+      };
+      memory.generate.add({
+        topic: MessageTopic.CODE,
+        content: JSON.stringify(result),
+        metadata: { direction: "out" },
+      });
+      emit({
+        type: "agent:complete",
+        agent: "patch",
+        role: "前端工程师",
+        output: result,
+        message: result.notes,
       });
       return result;
     },

@@ -27,6 +27,15 @@ export const SpecOutputSchema = z.object({
   requirements: z.array(z.string()),
   constraints: z.array(z.string()),
   userStories: z.array(z.string()),
+  /** 架构设计：SYSTEM_SPEC 输出契约中已声明，此处补齐类型（可选，兼容旧数据） */
+  architecture: z
+    .object({
+      type: z.string(),
+      ui: z.array(z.string()).optional(),
+      state: z.array(z.string()).optional(),
+      interactions: z.array(z.string()).optional(),
+    })
+    .optional(),
 });
 export type SpecOutput = z.infer<typeof SpecOutputSchema>;
 

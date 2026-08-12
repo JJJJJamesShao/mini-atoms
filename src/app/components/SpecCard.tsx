@@ -10,7 +10,8 @@ interface SpecCardProps {
 }
 
 const SECTIONS: {
-  key: keyof SpecOutput;
+  /** 仅三段式数组字段（SpecOutput 扩展 architecture 对象字段后需显式收窄） */
+  key: "requirements" | "constraints" | "userStories";
   title: string;
   className: string;
 }[] = [

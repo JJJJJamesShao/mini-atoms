@@ -475,19 +475,22 @@ export function createLLMExecutors(
           // 使用 patch prompt，传入当前代码和错误详情
           const messages = buildPatchPrompt(currentHtml, errors);
 
-          // 流式 + 超时保护（同 follow-up：非流式长请求会被代理静默挂起）
+          // 流式 + 超时保护（同 follow-up：非流式长请求会被代理静默挂起）。
+          // 补丁是小输出：300 字符节流让进度动态可见（默认 2000 会导致
+          // 整个补丁等待期零事件——曾出现第二轮修复 349 秒无反馈的观感卡死）
           const patchText = await collectGenerateStream(
             await streamChat(MODEL_ROUTING.generate, messages),
             bus,
             "generate",
             (len) => `第 ${patchRound} 轮修复：已接收 ${len} 字符 Patch...`,
+            300,
           );
 
           bus?.emit({
             type: "agent:thinking",
             agent: "generate",
             role: "前端工程师",
-            message: `收到 Patch 指令，正在解析并应用...`,
+            message: `补丁已接收（${patchText.length} 字符），正在解析并应用...`,
           });
 
           // 解析并应用 patch
@@ -670,11 +673,17 @@ export function createLLMExecutors(
         content: JSON.stringify(result),
         metadata: { direction: "out" },
       });
+      // 判定结果进文案：此前完成消息缺省为"校验完成"，pass/fail 不可见，
+      // 连判失败时用户在 UI 上看不出系统在为什么循环
+      const firstError = result.errors[0];
       emit({
         type: "agent:complete",
         agent: agentName,
         role: "代码审查员",
         output: result,
+        message: result.pass
+          ? "校验通过"
+          : `校验未通过：${result.errors.length} 处问题${firstError ? `（${firstError.message.slice(0, 60)}）` : ""}`,
       });
       return result;
     },

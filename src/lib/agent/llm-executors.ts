@@ -8,6 +8,7 @@ import type {
 import type OpenAI from "openai";
 import { streamChat, streamGLM } from "@/lib/llm/client";
 import { collectStreamText, throttleByChars } from "@/lib/llm/stream";
+import { callJsonLlm } from "@/lib/llm/json-stream";
 import { MODEL_ROUTING } from "@/lib/llm/models";
 import {
   buildClarifyPrompt,
@@ -35,16 +36,12 @@ import { MessageTopic } from "./message";
  * 流式超时档位（卡死判定统一只靠 idle；total 仅作失控兜底）：
  * - GENERATE：generate 系路径——完整重写 2 万+ 字符的大文件属正常时长，
  *   曾统一 300s 导致 follow-up 回退重写被误杀，故放宽到 600s
- * - FAST_JSON：clarify/spec 等 KB 级 JSON 输出，120s 足够
+ * - FAST_JSON（clarify/spec/locate）已迁至 lib/llm/json-stream.ts
  * - SUMMARY：一句话代码摘要，秒级
  */
 const GENERATE_STREAM_TIMEOUTS = {
   idleTimeoutMs: 60_000,
   totalTimeoutMs: 600_000,
-};
-const FAST_JSON_STREAM_TIMEOUTS = {
-  idleTimeoutMs: 60_000,
-  totalTimeoutMs: 120_000,
 };
 const SUMMARY_STREAM_TIMEOUTS = {
   idleTimeoutMs: 30_000,
@@ -73,31 +70,6 @@ async function collectGenerateStream(
         agent: agentName,
         role: "前端工程师",
         message: messageFor(acc.length),
-      });
-    }),
-  );
-}
-
-/**
- * clarify/spec 统一流式收集入口（KB 级 JSON、快模型）。
- * 替代非流式 chat()——后者无前端进度反馈，且曾被代理静默挂起。
- */
-async function collectJsonStream(
-  stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
-  bus: AgentEventBus | undefined,
-  agent: string,
-  role: string,
-  progressLabel: string,
-): Promise<string> {
-  return collectStreamText(
-    stream,
-    FAST_JSON_STREAM_TIMEOUTS,
-    throttleByChars(500, (acc) => {
-      bus?.emit({
-        type: "agent:progress",
-        agent,
-        role,
-        message: `${progressLabel}：已接收 ${acc.length} 字符...`,
       });
     }),
   );
@@ -264,19 +236,6 @@ async function collectStreamWithProgress(
   return { content, charCount: content.length, estimatedTokens };
 }
 
-/** 尝试从 LLM 输出中解析 JSON */
-function extractJson<T>(text: string): T {
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (match) {
-      return JSON.parse(match[1].trim()) as T;
-    }
-    throw new Error("无法从 LLM 输出中解析 JSON: " + text.slice(0, 200));
-  }
-}
-
 /** 清理 HTML 输出（去除可能的 markdown 包裹） */
 function extractHtml(text: string): string {
   // 使用贪婪匹配找到最后一个 ``` 结束标记，处理嵌套代码块
@@ -328,19 +287,16 @@ export function createLLMExecutors(
         model: config.model,
         promptLength: messages[1]?.content?.length ?? 0,
       });
-      const response = await streamChat(config, messages);
-      const text = await collectJsonStream(
-        response,
+      // 流式收集 + 坏 JSON 多级兜底 + 解析失败自动重试（快模型成本低）
+      const result = await callJsonLlm<ClarifyOutput>({
+        config,
+        messages,
         bus,
-        "clarify",
-        "产品经理",
-        "需求澄清中",
-      );
-      console.log("[DEBUG] Clarify 响应:", {
-        textLength: text.length,
-        textPrefix: text.slice(0, 100),
+        agent: "clarify",
+        role: "产品经理",
+        progressLabel: "需求澄清中",
       });
-      const result = extractJson<ClarifyOutput>(text);
+      console.log("[DEBUG] Clarify 响应: status =", result.status);
       memory.clarify.add({
         topic: MessageTopic.PRD,
         content: JSON.stringify(result),
@@ -381,19 +337,20 @@ export function createLLMExecutors(
         model: config.model,
         promptLength: messages[1]?.content?.length ?? 0,
       });
-      const response = await streamChat(config, messages);
-      const text = await collectJsonStream(
-        response,
+      // 流式收集 + 坏 JSON 多级兜底 + 解析失败自动重试（曾间歇性坏 JSON
+      // 直接杀死整条流水线——web-app 运行死在 spec 步骤的事故）
+      const result = await callJsonLlm<SpecOutput>({
+        config,
+        messages,
         bus,
-        "spec",
-        "架构师",
-        "规格设计中",
-      );
-      console.log("[DEBUG] Spec 响应:", {
-        textLength: text.length,
-        textPrefix: text.slice(0, 100),
+        agent: "spec",
+        role: "架构师",
+        progressLabel: "规格设计中",
       });
-      const result = extractJson<SpecOutput>(text);
+      console.log(
+        "[DEBUG] Spec 响应: requirements =",
+        result.requirements?.length ?? 0,
+      );
       memory.spec.add({
         topic: MessageTopic.ARCH_SPEC,
         content: JSON.stringify(result),
@@ -732,14 +689,15 @@ export function createLLMExecutors(
         metadata: { direction: "in" },
       });
       const messages = buildLocatePrompt(currentHtml, input);
-      const text = await collectJsonStream(
-        await streamChat(MODEL_ROUTING.clarify, messages),
+      // 与 clarify/spec 同一入口：流式收集 + 坏 JSON 兜底 + 解析失败重试
+      const result = await callJsonLlm<LocateOutput>({
+        config: MODEL_ROUTING.clarify,
+        messages,
         bus,
-        "locate",
-        "架构师",
-        "改动定位中",
-      );
-      const result = extractJson<LocateOutput>(text);
+        agent: "locate",
+        role: "架构师",
+        progressLabel: "改动定位中",
+      });
       memory.spec.add({
         topic: MessageTopic.ARCH_SPEC,
         content: JSON.stringify(result),

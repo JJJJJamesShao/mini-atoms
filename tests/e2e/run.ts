@@ -110,10 +110,6 @@ async function main(): Promise<void> {
     if (server && !server.killed) server.kill("SIGTERM");
   };
   process.on("exit", stopServer);
-  process.on("SIGINT", () => {
-    stopServer();
-    process.exit(130);
-  });
 
   const ctx: E2EContext = {
     baseUrl: BASE_URL,
@@ -122,6 +118,14 @@ async function main(): Promise<void> {
     createdProjectIds: [],
   };
   const outcomes: TaskOutcome[] = [];
+
+  // Ctrl-C 中断也要尽力清理测试项目（直接 exit 会跳过 finally，导致残留）
+  process.on("SIGINT", () => {
+    void cleanupProjects(ctx.createdProjectIds).finally(() => {
+      stopServer();
+      process.exit(130);
+    });
+  });
 
   try {
     await waitForServer(BASE_URL);

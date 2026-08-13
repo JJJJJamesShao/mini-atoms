@@ -34,6 +34,18 @@ export class StreamTimeoutError extends Error {
 }
 
 /**
+ * 输出触及 max_tokens 上限被截断（finish_reason: "length"）。
+ * 截断的 HTML 必然不完整，继续走校验/修复只会空转烧钱，
+ * 必须显式失败让上层感知——此前症状是"模型不再吐字、UI 干等"。
+ */
+export class StreamTruncatedError extends Error {
+  constructor(readonly chars: number) {
+    super(`LLM 输出触及 max_tokens 上限被截断（已接收 ${chars} 字符）`);
+    this.name = "StreamTruncatedError";
+  }
+}
+
+/**
  * 按字符增量节流的回调工厂：每新累积 intervalChars 才触发一次 fn。
  * 用于流式进度事件，避免逐 chunk 刷新事件总线。
  */
@@ -70,6 +82,7 @@ export async function collectStreamText(
   const deadline = Date.now() + opts.totalTimeoutMs;
   let content = "";
   let thinking = "";
+  let finishReason: string | null = null;
 
   const abort = () => {
     try {
@@ -113,7 +126,14 @@ export async function collectStreamText(
 
     try {
       const { done, value } = await Promise.race([iterator.next(), timeout]);
-      if (done) return content;
+      if (done) {
+        if (finishReason === "length") {
+          throw new StreamTruncatedError(content.length);
+        }
+        return content;
+      }
+      const fr = value.choices[0]?.finish_reason;
+      if (fr) finishReason = fr;
       // GLM：思考过程（reasoning_content）不进入产物，仅回调用于可观测性展示
       const delta0 = value.choices[0]?.delta as
         | (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & {

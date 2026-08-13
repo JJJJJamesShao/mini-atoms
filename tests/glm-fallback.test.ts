@@ -5,6 +5,9 @@
  * Vercel 上直连 bigmodel.cn 不可达时会挂起到被平台 300s 强杀。
  * 设计：reasoning_content 流式展示为 agent:thinking；
  * 首 token（content 或 reasoning）200s 未到达 → 主动断连，切换百炼 QWEN_3_8。
+ *
+ * 注意：非结构化生成已是两阶段（规划→出码），每次 generate 调用
+ * streamGLM 两次；两个阶段各自独立执行看门狗与兜底。
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,9 +33,12 @@ const SPEC: SpecOutput = {
   userStories: ["作为用户，我可以添加待办"],
 };
 
+const PLAN_TEXT =
+  "实现方案：单页面三区块布局，状态用数组管理。\n估算token：50000";
+
 /** 构造 OpenAI 流式 chunk 序列的假 Stream（content / reasoning_content 可混排） */
 function fakeStream(
-  chunks: Array<{ content?: string; reasoning?: string }>,
+  chunks: Array<{ content?: string; reasoning?: string; finish?: string }>,
 ): AsyncIterable<never> {
   return (async function* () {
     for (const c of chunks) {
@@ -40,7 +46,7 @@ function fakeStream(
         choices: [
           {
             index: 0,
-            finish_reason: null,
+            finish_reason: c.finish ?? null,
             delta: {
               content: c.content ?? "",
               reasoning_content: c.reasoning,
@@ -76,7 +82,7 @@ describe("collectStreamText 思考回调", () => {
       fakeStream([
         { reasoning: "先分析布局。" },
         { reasoning: "再实现交互。" },
-        { content: "<!DOCTYPE html>" },
+        { content: "<!DOCTYPE html>", finish: "stop" },
       ]) as Parameters<typeof collectStreamText>[0],
       { idleTimeoutMs: 1000, totalTimeoutMs: 5000 },
       undefined,
@@ -92,11 +98,14 @@ describe("generate 执行器 GLM 韧性", () => {
   it("GLM 正常：思考过程转为 agent:thinking 事件，产物不含思考内容", async () => {
     // emitThinking 按 300 字符节流，构造足够长的思考内容
     const reasoningChunk = "正在分析页面结构与状态管理设计。".repeat(20);
-    streamGLMMock.mockResolvedValue(
+    streamGLMMock.mockImplementation(() =>
       fakeStream([
         { reasoning: reasoningChunk },
         { reasoning: reasoningChunk },
-        { content: "<!DOCTYPE html><html><body>app</body></html>" },
+        {
+          content: "<!DOCTYPE html><html><body>app</body></html>",
+          finish: "stop",
+        },
       ]),
     );
 
@@ -122,23 +131,32 @@ describe("generate 执行器 GLM 韧性", () => {
           );
         }),
     );
-    streamChatMock.mockResolvedValue(
-      fakeStream([
-        { content: "<!DOCTYPE html><html><body>fallback</body></html>" },
-      ]),
-    );
+    // 两阶段各兜底一次：规划、出码各消费一条新流
+    streamChatMock
+      .mockImplementationOnce(() =>
+        fakeStream([{ content: PLAN_TEXT, finish: "stop" }]),
+      )
+      .mockImplementationOnce(() =>
+        fakeStream([
+          {
+            content: "<!DOCTYPE html><html><body>fallback</body></html>",
+            finish: "stop",
+          },
+        ]),
+      );
 
     vi.useFakeTimers();
     const { bus, events } = captureBus();
     const exec = createLLMExecutors(bus);
     const promise = exec.generate(SPEC);
 
-    // 推进到看门狗触发（200s）
+    // 阶段 1 看门狗触发 → 兜底出方案；阶段 2 看门狗再次触发 → 兜底出码
+    await vi.advanceTimersByTimeAsync(200_000);
     await vi.advanceTimersByTimeAsync(200_000);
     vi.useRealTimers();
 
     const result = await promise;
-    expect(streamChatMock).toHaveBeenCalledTimes(1);
+    expect(streamChatMock).toHaveBeenCalledTimes(2);
     expect(result.files[0].content).toContain("fallback");
     const fallbackNotice = events.find(
       (e) =>
@@ -150,17 +168,24 @@ describe("generate 执行器 GLM 韧性", () => {
 
   it("GLM 立即报错（如 401）：走通用降级文案，仍由百炼完成生成", async () => {
     streamGLMMock.mockRejectedValue(new Error("401 Unauthorized"));
-    streamChatMock.mockResolvedValue(
-      fakeStream([
-        { content: "<!DOCTYPE html><html><body>fallback</body></html>" },
-      ]),
-    );
+    streamChatMock
+      .mockImplementationOnce(() =>
+        fakeStream([{ content: PLAN_TEXT, finish: "stop" }]),
+      )
+      .mockImplementationOnce(() =>
+        fakeStream([
+          {
+            content: "<!DOCTYPE html><html><body>fallback</body></html>",
+            finish: "stop",
+          },
+        ]),
+      );
 
     const { bus, events } = captureBus();
     const exec = createLLMExecutors(bus);
     const result = await exec.generate(SPEC);
 
-    expect(streamChatMock).toHaveBeenCalledTimes(1);
+    expect(streamChatMock).toHaveBeenCalledTimes(2);
     expect(result.files[0].content).toContain("fallback");
     const fallbackNotice = events.find(
       (e) =>

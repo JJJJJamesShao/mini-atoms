@@ -7,9 +7,20 @@ import type {
 } from "../schemas";
 import type OpenAI from "openai";
 import { streamChat, streamGLM } from "@/lib/llm/client";
-import { collectStreamText, throttleByChars } from "@/lib/llm/stream";
+import {
+  collectStreamText,
+  StreamTruncatedError,
+  throttleByChars,
+} from "@/lib/llm/stream";
 import { callJsonLlm } from "@/lib/llm/json-stream";
 import { MODEL_ROUTING } from "@/lib/llm/models";
+import {
+  buildPlanPrompt,
+  GENERATE_MAX_TOKENS,
+  parseEstimatedTokens,
+  PLAN_MAX_TOKENS,
+  SINGLE_SHOT_TOKEN_BUDGET,
+} from "@/lib/llm/planner";
 import {
   buildClarifyPrompt,
   buildGameGeneratePrompt,
@@ -164,7 +175,7 @@ async function defaultSummarize(snippet: string): Promise<string> {
 async function collectStreamWithProgress(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   bus?: AgentEventBus,
-  onFirstChunk?: () => void,
+  options?: { onFirstChunk?: () => void; throwOnLength?: boolean },
 ): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
   // 每 200 字符 emit 一次进度（节流公共函数）
   const emitProgress = throttleByChars(200, (acc) => {
@@ -195,7 +206,7 @@ async function collectStreamWithProgress(
   const markFirstChunk = () => {
     if (firstChunkSeen) return;
     firstChunkSeen = true;
-    onFirstChunk?.();
+    options?.onFirstChunk?.();
   };
 
   // 子步骤解析：检测 <!-- SECTION: XXX --> 标记
@@ -226,7 +237,10 @@ async function collectStreamWithProgress(
 
   const content = await collectStreamText(
     stream,
-    GENERATE_STREAM_TIMEOUTS,
+    {
+      ...GENERATE_STREAM_TIMEOUTS,
+      throwOnLength: options?.throwOnLength,
+    },
     (acc) => {
       markFirstChunk();
       emitProgress(acc);
@@ -268,6 +282,129 @@ async function collectStreamWithProgress(
     firstChars: content.slice(0, 100),
   });
   return { content, charCount: content.length, estimatedTokens };
+}
+
+/**
+ * GLM 单阶段调用骨架：首 token 看门狗 + 流式收集 + 失败兜底。
+ * - 看门狗：200s 内连 reasoning 都未到 → 主动断连（防 Vercel 300s 平台强杀）
+ * - 截断（finish_reason=length）仅在 strictLength（出码期）启用：
+ *   截断 HTML 继续走校验/修复只会空转烧钱，显式上抛失败，
+ *   避免"模型不再吐字、UI 干等"的事故形态；规划期方案只是建议性输入，
+ *   截断就用已得部分继续出码，不构成致命错误
+ * - 其他 GLM 失败 → 百炼 QWEN_3_8 兜底（与 qwen3.6-flash 同 endpoint/key）
+ */
+async function runGLMPhase(
+  messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  opts: {
+    maxTokens: number;
+    thinking: boolean;
+    bus?: AgentEventBus;
+    /** true=完整进度收集（出码期：字符进度+子步骤+摘要）；false=轻量（规划期） */
+    richProgress: boolean;
+    /** true=截断显式抛 StreamTruncatedError（仅出码期）；false=收多少用多少 */
+    strictLength?: boolean;
+    /** 轻量进度的文案前缀（规划期用） */
+    progressLabel?: string;
+  },
+): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
+  const { bus } = opts;
+  const watchdog = new AbortController();
+  let watchdogFired = false;
+  const watchdogTimer = setTimeout(() => {
+    watchdogFired = true;
+    watchdog.abort();
+  }, GLM_FIRST_TOKEN_TIMEOUT_MS);
+  const disarm = () => clearTimeout(watchdogTimer);
+
+  /** 轻量收集：节流进度 + 思考展示（规划期不需要子步骤检测与代码摘要） */
+  const collectLight = async (
+    stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+    onFirstChunk?: () => void,
+  ) => {
+    const label = opts.progressLabel ?? "输出";
+    const emitProgress = throttleByChars(300, (acc) => {
+      bus?.emit({
+        type: "agent:progress",
+        agent: "generate",
+        role: "前端工程师",
+        message: `${label}（已输出 ${acc.length} 字符）...`,
+      });
+    });
+    const emitThinking = throttleByChars(300, (acc) => {
+      const snippet = acc.slice(-150).trim();
+      if (!snippet) return;
+      bus?.emit({
+        type: "agent:thinking",
+        agent: "generate",
+        role: "前端工程师",
+        message: `思考中：${snippet}`,
+      });
+    });
+    let seen = false;
+    const markFirst = () => {
+      if (seen) return;
+      seen = true;
+      onFirstChunk?.();
+    };
+    const content = await collectStreamText(
+      stream,
+      {
+        ...GENERATE_STREAM_TIMEOUTS,
+        throwOnLength: opts.strictLength,
+      },
+      (acc) => {
+        markFirst();
+        emitProgress(acc);
+      },
+      (acc) => {
+        markFirst();
+        emitThinking(acc);
+      },
+    );
+    return {
+      content,
+      charCount: content.length,
+      estimatedTokens: Math.round(content.length * 0.75),
+    };
+  };
+
+  try {
+    const stream = await streamGLM(messages, {
+      maxTokens: opts.maxTokens,
+      temperature: 0.2,
+      signal: watchdog.signal,
+      thinking: opts.thinking,
+    });
+    const result = opts.richProgress
+      ? await collectStreamWithProgress(stream, bus, {
+          onFirstChunk: disarm,
+          throwOnLength: opts.strictLength,
+        })
+      : await collectLight(stream, disarm);
+    disarm();
+    return result;
+  } catch (glmErr) {
+    disarm();
+    if (glmErr instanceof StreamTruncatedError) {
+      throw glmErr;
+    }
+    console.warn("[GLM Fallback]", glmErr);
+    bus?.emit({
+      type: "agent:thinking",
+      agent: "generate",
+      role: "前端工程师",
+      message: watchdogFired
+        ? `GLM 首 token 超过 ${Math.round(GLM_FIRST_TOKEN_TIMEOUT_MS / 1000)}s 未响应，切换到百炼强模型...`
+        : "GLM 服务暂不可用，降级到百炼流式模型...",
+    });
+    // 兜底：百炼强模型（QWEN_3_8），与 qwen3.6-flash 同 endpoint/key
+    const stream = await streamChat(MODEL_ROUTING.generate, messages);
+    return opts.richProgress
+      ? collectStreamWithProgress(stream, bus, {
+          throwOnLength: opts.strictLength,
+        })
+      : collectLight(stream);
+  }
 }
 
 /** 清理 HTML 输出（去除可能的 markdown 包裹） */
@@ -582,63 +719,97 @@ export function createLLMExecutors(
         }
 
         // === 正常生成模式（首次生成 或 Patch 失败回退） ===
-        const messages = options?.structured
-          ? buildGameGeneratePrompt(spec, errors)
-          : buildGeneratePrompt(spec, errors);
-
-        bus?.emit({
-          type: "agent:progress",
-          agent: "generate",
-          role: "前端工程师",
-          percent: 10,
-          message: isFixMode
-            ? "Patch 失败，回退到完整重写..."
-            : "正在调用 GLM-5.2 生成代码...",
-        });
-
+        // 非结构化路径走两阶段生成：
+        //  阶段 1（思考期）——充足思考余量输出完整实现方案；
+        //  阶段 2（出码期）——关闭深度思考，方案作为输入直接出码。
+        //  GLM 的 max_tokens 对思考+正文合并计费，拆开后出码期独占输出预算，
+        //  等效突破单次 128K 的内容上限；出码上限收至 100K 给模型留余量。
         let content: string;
         let charCount: number;
         let estimatedTokens: number;
 
-        // 首 token 看门狗：覆盖 create() 建连 + 等待首个 content/reasoning chunk。
-        // 200s 内连思考内容都没到 → GLM 不可达（如跨境黑洞），主动断连走兜底，
-        // 避免挂起到被 Vercel 300s 平台强杀（无错误事件、无落库的事故形态）。
-        const glmWatchdog = new AbortController();
-        let watchdogFired = false;
-        const watchdogTimer = setTimeout(() => {
-          watchdogFired = true;
-          glmWatchdog.abort();
-        }, GLM_FIRST_TOKEN_TIMEOUT_MS);
-
-        try {
-          const stream = await streamGLM(messages, {
-            maxTokens: 131072,
-            temperature: 0.2,
-            signal: glmWatchdog.signal,
-          });
-          const result = await collectStreamWithProgress(stream, bus, () => {
-            clearTimeout(watchdogTimer);
-          });
-          content = result.content;
-          charCount = result.charCount;
-          estimatedTokens = result.estimatedTokens;
-        } catch (glmErr) {
-          clearTimeout(watchdogTimer);
-          console.warn("[GLM Fallback]", glmErr);
+        if (options?.structured) {
+          // 游戏 SOP 结构化路径：保持单阶段（JSON 产物不宜拆规划/出码）
           bus?.emit({
-            type: "agent:thinking",
+            type: "agent:progress",
             agent: "generate",
             role: "前端工程师",
-            message: watchdogFired
-              ? `GLM 首 token 超过 ${Math.round(GLM_FIRST_TOKEN_TIMEOUT_MS / 1000)}s 未响应，切换到百炼强模型...`
-              : "GLM 服务暂不可用，降级到百炼流式模型...",
+            percent: 10,
+            message: isFixMode
+              ? "Patch 失败，回退到完整重写..."
+              : "正在调用 GLM-5.2 生成代码...",
           });
-          // 兜底：百炼强模型（QWEN_3_8），与 qwen3.6-flash 同 endpoint/key
-          const stream = await streamChat(MODEL_ROUTING.generate, messages);
-          const result = await collectStreamWithProgress(stream, bus);
-          content = result.content;
-          charCount = result.charCount;
-          estimatedTokens = result.estimatedTokens;
+          const r = await runGLMPhase(buildGameGeneratePrompt(spec, errors), {
+            maxTokens: 131072,
+            thinking: true,
+            bus,
+            richProgress: true,
+            // 结构化路径保持既有降级（截断→合并→校验→fix 循环），不启用截断抛错
+            strictLength: false,
+          });
+          content = r.content;
+          charCount = r.charCount;
+          estimatedTokens = r.estimatedTokens;
+        } else {
+          // 阶段 1：架构思考（thinking 开，充足思考余量）
+          bus?.emit({
+            type: "agent:progress",
+            agent: "generate",
+            role: "前端工程师",
+            percent: 5,
+            message: isFixMode
+              ? "Patch 失败，回退完整重写：重新规划实现方案..."
+              : "阶段 1/2：架构思考与实现方案规划...",
+          });
+          const plan = await runGLMPhase(buildPlanPrompt(spec, errors), {
+            maxTokens: PLAN_MAX_TOKENS,
+            thinking: true,
+            bus,
+            richProgress: false,
+            // 方案只是阶段 2 的建议性输入：触及 32K 上限截断时用已得部分
+            // 继续出码，不构成致命错误（strictLength 关闭）
+            progressLabel: "实现方案规划中",
+          });
+
+          // 模型自估代码量超单次出码安全线 → 提示截断风险（仍继续尝试）
+          const estimated = parseEstimatedTokens(plan.content);
+          if (estimated !== null && estimated > SINGLE_SHOT_TOKEN_BUDGET) {
+            bus?.emit({
+              type: "agent:thinking",
+              agent: "generate",
+              role: "前端工程师",
+              message: `模型预估实现代码约 ${estimated} tokens，超过单次出码安全线 ${SINGLE_SHOT_TOKEN_BUDGET}，存在截断风险`,
+            });
+          }
+
+          // 阶段 2：关闭深度思考，把方案作为输入直接输出代码
+          bus?.emit({
+            type: "agent:progress",
+            agent: "generate",
+            role: "前端工程师",
+            percent: 10,
+            message: "阶段 2/2：深度思考已关闭，按方案直接输出代码...",
+          });
+          const codeMessages = [
+            ...buildGeneratePrompt(spec, errors),
+            {
+              role: "user" as const,
+              content:
+                "实现方案（架构师已完成深度思考与完整设计，请严格遵循该方案，直接输出完整代码，不要省略、不要二次设计）：\n\n" +
+                plan.content,
+            },
+          ];
+          const r = await runGLMPhase(codeMessages, {
+            maxTokens: GENERATE_MAX_TOKENS,
+            thinking: false,
+            bus,
+            richProgress: true,
+            // 出码期：截断 HTML 走校验/修复只会空转烧钱，显式失败
+            strictLength: true,
+          });
+          content = r.content;
+          charCount = r.charCount;
+          estimatedTokens = r.estimatedTokens;
         }
 
         let result: GenerateOutput;

@@ -75,18 +75,33 @@ export async function chat(
 /** GLM 专用流式对话（供 generate 节点使用）；signal 用于首 token 看门狗主动断连 */
 export async function streamGLM(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  options?: { maxTokens?: number; temperature?: number; signal?: AbortSignal },
+  options?: {
+    maxTokens?: number;
+    temperature?: number;
+    signal?: AbortSignal;
+    /**
+     * false 时传 thinking: {type: "disabled"} 关闭深度思考（两阶段生成的出码期）。
+     * 缺省/true 不传该参数，保持 GLM 默认开启思考。
+     */
+    thinking?: boolean;
+  },
 ) {
   const client = getGLMClient();
   const model = process.env.GLM_5_2 ?? "glm-5.2";
+  const body = {
+    model,
+    messages,
+    max_tokens: options?.maxTokens ?? 131072,
+    temperature: options?.temperature ?? 0.2,
+    stream: true,
+    // 关思考：智谱格式 + 百炼格式同时带上（实测 glm-5.2/qwen3.8-max
+    // 在代理与原生端点均兼容双开关，reasoning 归零），覆盖全百炼部署形态
+    ...(options?.thinking === false
+      ? { thinking: { type: "disabled" }, enable_thinking: false }
+      : {}),
+  };
   return client.chat.completions.create(
-    {
-      model,
-      messages,
-      max_tokens: options?.maxTokens ?? 131072,
-      temperature: options?.temperature ?? 0.2,
-      stream: true,
-    },
+    body as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
     { signal: options?.signal },
   );
 }

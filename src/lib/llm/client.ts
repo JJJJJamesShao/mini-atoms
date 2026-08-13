@@ -72,18 +72,21 @@ export async function chat(
   );
 }
 
-/** GLM 专用流式对话（供 generate 节点使用） */
+/** GLM 专用流式对话（供 generate 节点使用）；signal 用于首 token 看门狗主动断连 */
 export async function streamGLM(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  options?: { maxTokens?: number; temperature?: number },
+  options?: { maxTokens?: number; temperature?: number; signal?: AbortSignal },
 ) {
   const client = getGLMClient();
   const model = process.env.GLM_5_2 ?? "glm-5.2";
-  return client.chat.completions.create({
-    model,
-    messages,
-    max_tokens: options?.maxTokens ?? 131072,
-    temperature: options?.temperature ?? 0.2,
-    stream: true,
-  });
+  return client.chat.completions.create(
+    {
+      model,
+      messages,
+      max_tokens: options?.maxTokens ?? 131072,
+      temperature: options?.temperature ?? 0.2,
+      stream: true,
+    },
+    { signal: options?.signal },
+  );
 }

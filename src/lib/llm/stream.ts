@@ -20,6 +20,13 @@ export interface StreamTimeoutOptions {
   idleTimeoutMs: number;
   /** 总时长硬上限（毫秒） */
   totalTimeoutMs: number;
+  /**
+   * true 时 finish_reason=length 抛 StreamTruncatedError（opt-in）。
+   * 仅 GLM 两阶段出码期启用：截断 HTML 继续走校验/修复只会空转烧钱。
+   * 其余调用方（callJsonLlm 重试、patch/stage 降级循环）依赖既有
+   * 坏输出容错机制，必须保持默认 false。
+   */
+  throwOnLength?: boolean;
 }
 
 /** 流式收集超时（区分于网络错误，上层可据此给出准确文案） */
@@ -35,8 +42,9 @@ export class StreamTimeoutError extends Error {
 
 /**
  * 输出触及 max_tokens 上限被截断（finish_reason: "length"）。
- * 截断的 HTML 必然不完整，继续走校验/修复只会空转烧钱，
- * 必须显式失败让上层感知——此前症状是"模型不再吐字、UI 干等"。
+ * 仅在 collectStreamText 的 throwOnLength opt-in 开启时抛出
+ * （GLM 两阶段出码期）：截断的 HTML 必然不完整，继续走校验/修复
+ * 只会空转烧钱，必须显式失败让上层感知——此前症状是"模型不再吐字、UI 干等"。
  */
 export class StreamTruncatedError extends Error {
   constructor(readonly chars: number) {
@@ -127,7 +135,7 @@ export async function collectStreamText(
     try {
       const { done, value } = await Promise.race([iterator.next(), timeout]);
       if (done) {
-        if (finishReason === "length") {
+        if (finishReason === "length" && opts.throwOnLength) {
           throw new StreamTruncatedError(content.length);
         }
         return content;

@@ -175,7 +175,7 @@ async function defaultSummarize(snippet: string): Promise<string> {
 async function collectStreamWithProgress(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   bus?: AgentEventBus,
-  onFirstChunk?: () => void,
+  options?: { onFirstChunk?: () => void; throwOnLength?: boolean },
 ): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
   // 每 200 字符 emit 一次进度（节流公共函数）
   const emitProgress = throttleByChars(200, (acc) => {
@@ -206,7 +206,7 @@ async function collectStreamWithProgress(
   const markFirstChunk = () => {
     if (firstChunkSeen) return;
     firstChunkSeen = true;
-    onFirstChunk?.();
+    options?.onFirstChunk?.();
   };
 
   // 子步骤解析：检测 <!-- SECTION: XXX --> 标记
@@ -237,7 +237,10 @@ async function collectStreamWithProgress(
 
   const content = await collectStreamText(
     stream,
-    GENERATE_STREAM_TIMEOUTS,
+    {
+      ...GENERATE_STREAM_TIMEOUTS,
+      throwOnLength: options?.throwOnLength,
+    },
     (acc) => {
       markFirstChunk();
       emitProgress(acc);
@@ -284,8 +287,10 @@ async function collectStreamWithProgress(
 /**
  * GLM 单阶段调用骨架：首 token 看门狗 + 流式收集 + 失败兜底。
  * - 看门狗：200s 内连 reasoning 都未到 → 主动断连（防 Vercel 300s 平台强杀）
- * - 截断（finish_reason=length）不兜底：百炼 8K 上限更装不下长代码，
- *   直接上抛显式失败，避免"模型不再吐字、UI 干等"的事故形态
+ * - 截断（finish_reason=length）仅在 strictLength（出码期）启用：
+ *   截断 HTML 继续走校验/修复只会空转烧钱，显式上抛失败，
+ *   避免"模型不再吐字、UI 干等"的事故形态；规划期方案只是建议性输入，
+ *   截断就用已得部分继续出码，不构成致命错误
  * - 其他 GLM 失败 → 百炼 QWEN_3_8 兜底（与 qwen3.6-flash 同 endpoint/key）
  */
 async function runGLMPhase(
@@ -296,6 +301,8 @@ async function runGLMPhase(
     bus?: AgentEventBus;
     /** true=完整进度收集（出码期：字符进度+子步骤+摘要）；false=轻量（规划期） */
     richProgress: boolean;
+    /** true=截断显式抛 StreamTruncatedError（仅出码期）；false=收多少用多少 */
+    strictLength?: boolean;
     /** 轻量进度的文案前缀（规划期用） */
     progressLabel?: string;
   },
@@ -341,7 +348,10 @@ async function runGLMPhase(
     };
     const content = await collectStreamText(
       stream,
-      GENERATE_STREAM_TIMEOUTS,
+      {
+        ...GENERATE_STREAM_TIMEOUTS,
+        throwOnLength: opts.strictLength,
+      },
       (acc) => {
         markFirst();
         emitProgress(acc);
@@ -366,7 +376,10 @@ async function runGLMPhase(
       thinking: opts.thinking,
     });
     const result = opts.richProgress
-      ? await collectStreamWithProgress(stream, bus, disarm)
+      ? await collectStreamWithProgress(stream, bus, {
+          onFirstChunk: disarm,
+          throwOnLength: opts.strictLength,
+        })
       : await collectLight(stream, disarm);
     disarm();
     return result;
@@ -387,7 +400,9 @@ async function runGLMPhase(
     // 兜底：百炼强模型（QWEN_3_8），与 qwen3.6-flash 同 endpoint/key
     const stream = await streamChat(MODEL_ROUTING.generate, messages);
     return opts.richProgress
-      ? collectStreamWithProgress(stream, bus)
+      ? collectStreamWithProgress(stream, bus, {
+          throwOnLength: opts.strictLength,
+        })
       : collectLight(stream);
   }
 }
@@ -729,6 +744,8 @@ export function createLLMExecutors(
             thinking: true,
             bus,
             richProgress: true,
+            // 结构化路径保持既有降级（截断→合并→校验→fix 循环），不启用截断抛错
+            strictLength: false,
           });
           content = r.content;
           charCount = r.charCount;
@@ -749,6 +766,8 @@ export function createLLMExecutors(
             thinking: true,
             bus,
             richProgress: false,
+            // 方案只是阶段 2 的建议性输入：触及 32K 上限截断时用已得部分
+            // 继续出码，不构成致命错误（strictLength 关闭）
             progressLabel: "实现方案规划中",
           });
 
@@ -785,6 +804,8 @@ export function createLLMExecutors(
             thinking: false,
             bus,
             richProgress: true,
+            // 出码期：截断 HTML 走校验/修复只会空转烧钱，显式失败
+            strictLength: true,
           });
           content = r.content;
           charCount = r.charCount;

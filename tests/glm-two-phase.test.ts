@@ -172,4 +172,38 @@ describe("两阶段生成", () => {
     await expect(exec.generate(SPEC)).rejects.toThrow(StreamTruncatedError);
     expect(streamChatMock).not.toHaveBeenCalled();
   });
+
+  it("规划期截断：不致命，用已得方案降级继续出码", async () => {
+    // 阶段 1 方案只是建议性输入：思考挤占 32K 预算导致截断时，
+    // 收多少用多少，不启用截断抛错
+    streamGLMMock
+      .mockImplementationOnce(() =>
+        fakeStream([
+          { content: "实现方案：单页面三区块布局，状态用数组管理（未完" },
+          { content: "", finish: "length" },
+        ]),
+      )
+      .mockImplementationOnce(() =>
+        fakeStream([
+          {
+            content: "<!DOCTYPE html><html><body>app</body></html>",
+            finish: "stop",
+          },
+        ]),
+      );
+
+    const { bus } = captureBus();
+    const exec = createLLMExecutors(bus);
+    const result = await exec.generate(SPEC);
+
+    expect(streamGLMMock).toHaveBeenCalledTimes(2);
+    expect(result.files[0].content).toContain("<!DOCTYPE html>");
+    // 半截方案仍注入出码消息
+    const phase2Messages = streamGLMMock.mock.calls[1][0] as Array<{
+      content: string;
+    }>;
+    expect(phase2Messages.at(-1)?.content).toContain(
+      "实现方案：单页面三区块布局",
+    );
+  });
 });

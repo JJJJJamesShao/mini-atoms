@@ -65,6 +65,38 @@ describe("extractJson 多级兜底", () => {
 });
 
 describe("callJsonLlm 解析失败重试", () => {
+  it("截断输出（finish_reason=length）：走重试路径而非抛 StreamTruncatedError", async () => {
+    // 回归：截断抛错是 GLM 出码期 opt-in 行为，JSON 节点必须保持
+    // 「收多少解析多少 → 失败重试」的既有容错（spec 事故护栏）
+    let calls = 0;
+    const chatFn = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return (async function* () {
+          yield {
+            choices: [
+              { delta: { content: '{"ok": tru' }, finish_reason: null },
+            ],
+          };
+          yield {
+            choices: [{ delta: { content: "" }, finish_reason: "length" }],
+          };
+        })();
+      }
+      return fakeStream('{"ok": true}');
+    }) as unknown as ChatFn;
+    const result = await callJsonLlm<{ ok: boolean }>({
+      config: TEST_CONFIG,
+      messages: [{ role: "user", content: "hi" }],
+      chatFn,
+      agent: "spec",
+      role: "架构师",
+      progressLabel: "规格设计中",
+    });
+    expect(result).toEqual({ ok: true });
+    expect(calls).toBe(2);
+  });
+
   it("首次即合法：只调用一次", async () => {
     let calls = 0;
     const chatFn = (async () => {

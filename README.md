@@ -161,19 +161,35 @@ done / fix-patch（最多 5 轮）
 
 **效果**: "把背景改成蓝色" → 只改背景色，保留所有游戏逻辑。
 
-#### 5. 多 Provider 降级
+#### 5. 多 Provider 降级与 GLM 韧性
 
-**问题**: 单一 LLM 服务不稳定，长内容生成易超时。
+**问题**: 单一 LLM 服务不稳定，长内容生成易超时；GLM 深度思考阶段可静默数分钟，海外节点直连原生端点不可达。
 
 **方案**:
 
-| 节点         | 主模型                | 降级路径          |
-| ------------ | --------------------- | ----------------- |
-| clarify/spec | Qwen 3.6 Flash (快)   | 百炼 Qwen 系列    |
-| generate/fix | GLM-5.2 (128K 上下文) | 百炼 Qwen 3.8 Max |
-| locate/patch | Qwen 3.8 Max          | 百炼 Qwen 系列    |
+| 节点         | 主模型              | 降级路径                    |
+| ------------ | ------------------- | --------------------------- |
+| clarify/spec | Qwen 3.6 Flash (快) | 坏 JSON 多级解析 + 自动重试 |
+| generate/fix | GLM-5.2             | 百炼 Qwen 3.8 Max           |
+| locate/patch | Qwen 3.8 Max        | 百炼 Qwen 系列              |
 
-GLM-5.2 流式生成 + 实时进度推送，失败自动降级到百炼。
+- **思考过程可见**：`reasoning_content` 实时流式展示（"思考中：..."），不再死寂等待
+- **首 token 看门狗**：200s 无任何响应 → 主动断连切换百炼兜底，避免挂起到被平台强杀
+- **显式失败**：输出触及 max_tokens 截断（`finish_reason=length`）立即报错，不再空转修复烧 token
+
+#### 6. 两阶段生成（思考/出码拆分）
+
+**问题**: GLM 的 max_tokens 对**思考+正文合并计费**，深度思考挤占输出预算，长代码生成触及 128K 上限被截断。
+
+**方案**:
+
+```
+阶段 1（思考期）: thinking 开启，32K 预算 → 输出完整实现方案 + 自估代码量
+     ↓
+阶段 2（出码期）: thinking 关闭，100K 预算独占 → 按方案直接输出代码
+```
+
+出码期首字节从 ~193s 降至秒级，思考不再挤占输出预算，等效突破单次内容上限。
 
 ---
 
@@ -230,6 +246,7 @@ GLM-5.2 流式生成 + 实时进度推送，失败自动降级到百炼。
 
 - 实时阶段卡片：clarify → spec → approve → generate → verify → done
 - 执行日志面板：每个 Agent 的输入/输出/耗时
+- 思考过程展示：GLM 深度思考的 reasoning 实时流式可见
 - 异步代码摘要：generate 阶段每 3 秒刷新"正在做什么"的提示
 
 ---
@@ -250,7 +267,7 @@ GLM-5.2 流式生成 + 实时进度推送，失败自动降级到百炼。
 
 ### 环境变量
 
-复制 `.env.local.example` 为 `.env.local`，填入：
+创建 `.env.local`，填入：
 
 ```bash
 # Supabase（持久化 + Auth）
@@ -259,10 +276,18 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SECRET_KEY=your-service-role-key
 
-# LLM
+# LLM — GLM（generate 节点主模型）
 GLM_API_KEY=your-glm-key
+# GLM_BASE_URL 缺省为智谱原生端点；海外部署（如 Vercel）需指向百炼代理
+GLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+
+# LLM — 百炼代理（clarify/spec/locate/patch + generate 兜底）
 ANTHROPIC_AUTH_TOKEN=your-bailian-token
-ANTHROPIC_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+ANTHROPIC_BASE_URL=your-bailian-proxy-url
+
+# E2E 黑箱测试（可选，仅 npm run test:e2e 需要）
+E2E_TEST_EMAIL=your-test-account
+E2E_TEST_PASSWORD=your-test-password
 ```
 
 ### 数据库初始化
@@ -288,16 +313,20 @@ npm run dev
 ## 测试
 
 ```bash
-npm test          # 运行全部测试（67 个）
-./verify.sh       # TypeScript 编译 + lint + test
+npm test            # 单元/集成测试（171 个，19 个文件）
+npm run test:e2e    # E2E 黑箱流程测试（自起 dev server，烧真实 LLM 额度）
+./verify.sh         # L1 门禁：lint → tsc → test → build
 ```
 
-| 测试模块 | 覆盖内容                                             |
-| -------- | ---------------------------------------------------- |
-| SOP 引擎 | 正常流程 / 失败重试 / 确认门 / 多轮修复 / Modify SOP |
-| 架构隔离 | 角色 Memory 隔离 / CodeArtifact 解析 / Topic 消息池  |
-| 代码校验 | 语法 / 安全 / 结构校验 / 错误定位                    |
-| 数据库   | 项目 / 版本 / 消息 / 用户 / 限流                     |
+| 测试模块  | 覆盖内容                                                          |
+| --------- | ----------------------------------------------------------------- |
+| SOP 引擎  | 正常流程 / 失败重试 / 确认门 / 多轮修复 / Modify SOP              |
+| 架构隔离  | 角色 Memory 隔离 / CodeArtifact 解析 / Topic 消息池               |
+| 代码校验  | 语法 / 安全 / 结构校验 / 错误定位                                 |
+| LLM 韧性  | 思考展示 / 首 token 看门狗 / 百炼兜底 / 两阶段生成 / 截断显式失败 |
+| JSON 容错 | 坏 JSON 多级解析 / 截断重试                                       |
+| 数据库    | 项目 / 版本 / 消息 / 用户 / 限流                                  |
+| E2E 黑箱  | 注册登录 → 新建生成 → follow-up 修改 → 刷新恢复                   |
 
 ---
 
@@ -338,7 +367,7 @@ mini-atoms/
 
 ## 文档
 
-- [CHANGELOG.md](CHANGELOG.md) — 完整迭代日志（35+ PR）
+- [CHANGELOG.md](CHANGELOG.md) — 迭代日志
 - [docs/spec.md](docs/spec.md) — 系统规格文档
 - [docs/constitution.md](docs/constitution.md) — 项目宪法（不可变契约）
 - [docs/plan.md](docs/plan.md) — 实施计划与任务拆解
@@ -348,16 +377,18 @@ mini-atoms/
 
 ## 演进历程
 
-mini-atoms 在 48 小时笔试期间经历了 **35+ PR** 的持续迭代，核心演进路径：
+mini-atoms 在 48 小时笔试期间经历了 **40+ PR** 的持续迭代，核心演进路径：
 
-| 阶段         | 重点                                    | 代表 PR  |
-| ------------ | --------------------------------------- | -------- |
-| **T0 地基**  | 脚手架、CI/CD、SOP 状态机、校验层       | #13-#15  |
-| **核心闭环** | LLM 联调、前端接入、对话式迭代          | #16-#20  |
-| **稳定性**   | SSE 心跳保活、流式化、断流兜底          | #29-#33  |
-| **持久化**   | 过程数据落库、确认门持久化、刷新恢复    | #27, #31 |
-| **复杂任务** | 多阶段 SOP、分层生成、缺页检测          | #32      |
-| **增量修改** | Locate→Patch→Apply 小循环、三级模糊匹配 | #34      |
+| 阶段         | 重点                                             | 代表 PR      |
+| ------------ | ------------------------------------------------ | ------------ |
+| **T0 地基**  | 脚手架、CI/CD、SOP 状态机、校验层                | #13-#15      |
+| **核心闭环** | LLM 联调、前端接入、对话式迭代                   | #16-#20      |
+| **稳定性**   | SSE 心跳保活、流式化、断流兜底                   | #29-#33      |
+| **持久化**   | 过程数据落库、确认门持久化、刷新恢复             | #27, #31     |
+| **复杂任务** | 多阶段 SOP、分层生成、缺页检测                   | #32          |
+| **增量修改** | Locate→Patch→Apply 小循环、三级模糊匹配          | #34          |
+| **测试体系** | E2E 黑箱 harness、手动测试 SOP、可观测性         | #38-#40      |
+| **LLM 韧性** | JSON 容错、思考展示、首 token 看门狗、两阶段生成 | #37, #41-#42 |
 
 ---
 

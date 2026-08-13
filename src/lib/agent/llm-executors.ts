@@ -49,6 +49,14 @@ const SUMMARY_STREAM_TIMEOUTS = {
 };
 
 /**
+ * GLM 首 token 看门狗：GLM 深度思考阶段可静默数分钟（实测约 193s），
+ * 但若连 reasoning_content 都 200s 未到达，判定 GLM 服务不可达
+ * （如 Vercel 美东直连 bigmodel.cn 黑洞），主动断连切换百炼兜底，
+ * 避免挂起直到被平台 300s 强杀。
+ */
+const GLM_FIRST_TOKEN_TIMEOUT_MS = 200_000;
+
+/**
  * generate 系路径统一流式收集入口：超时档位 + 节流进度事件。
  * 此前 stage/follow-up/patch 三处逐字复制同一段"每 2000 字符 emit"模板。
  * @param intervalChars - 进度事件节流间隔（字符）；补丁类小输出用 300，
@@ -156,6 +164,7 @@ async function defaultSummarize(snippet: string): Promise<string> {
 async function collectStreamWithProgress(
   stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   bus?: AgentEventBus,
+  onFirstChunk?: () => void,
 ): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
   // 每 200 字符 emit 一次进度（节流公共函数）
   const emitProgress = throttleByChars(200, (acc) => {
@@ -168,6 +177,26 @@ async function collectStreamWithProgress(
       message: `已生成 ${acc.length} 字符（约 ${estimatedTokens} tokens）...`,
     });
   });
+
+  // GLM 深度思考展示：reasoning_content 节流转发，让用户看见"在思考"而非死寂
+  const emitThinking = throttleByChars(300, (acc) => {
+    // 只保留最近一段：避免思考全文刷屏，也控制事件落库体积
+    const snippet = acc.slice(-150).trim();
+    if (!snippet) return;
+    bus?.emit({
+      type: "agent:thinking",
+      agent: "generate",
+      role: "前端工程师",
+      message: `思考中：${snippet}`,
+    });
+  });
+
+  let firstChunkSeen = false;
+  const markFirstChunk = () => {
+    if (firstChunkSeen) return;
+    firstChunkSeen = true;
+    onFirstChunk?.();
+  };
 
   // 子步骤解析：检测 <!-- SECTION: XXX --> 标记
   const SECTION_MARKERS = [
@@ -199,6 +228,7 @@ async function collectStreamWithProgress(
     stream,
     GENERATE_STREAM_TIMEOUTS,
     (acc) => {
+      markFirstChunk();
       emitProgress(acc);
 
       // 检测子步骤标记
@@ -225,6 +255,10 @@ async function collectStreamWithProgress(
           });
         });
       }
+    },
+    (acc) => {
+      markFirstChunk();
+      emitThinking(acc);
     },
   );
 
@@ -566,23 +600,40 @@ export function createLLMExecutors(
         let charCount: number;
         let estimatedTokens: number;
 
+        // 首 token 看门狗：覆盖 create() 建连 + 等待首个 content/reasoning chunk。
+        // 200s 内连思考内容都没到 → GLM 不可达（如跨境黑洞），主动断连走兜底，
+        // 避免挂起到被 Vercel 300s 平台强杀（无错误事件、无落库的事故形态）。
+        const glmWatchdog = new AbortController();
+        let watchdogFired = false;
+        const watchdogTimer = setTimeout(() => {
+          watchdogFired = true;
+          glmWatchdog.abort();
+        }, GLM_FIRST_TOKEN_TIMEOUT_MS);
+
         try {
           const stream = await streamGLM(messages, {
             maxTokens: 131072,
             temperature: 0.2,
+            signal: glmWatchdog.signal,
           });
-          const result = await collectStreamWithProgress(stream, bus);
+          const result = await collectStreamWithProgress(stream, bus, () => {
+            clearTimeout(watchdogTimer);
+          });
           content = result.content;
           charCount = result.charCount;
           estimatedTokens = result.estimatedTokens;
         } catch (glmErr) {
+          clearTimeout(watchdogTimer);
           console.warn("[GLM Fallback]", glmErr);
           bus?.emit({
             type: "agent:thinking",
             agent: "generate",
             role: "前端工程师",
-            message: "GLM 服务暂不可用，降级到百炼流式模型...",
+            message: watchdogFired
+              ? `GLM 首 token 超过 ${Math.round(GLM_FIRST_TOKEN_TIMEOUT_MS / 1000)}s 未响应，切换到百炼强模型...`
+              : "GLM 服务暂不可用，降级到百炼流式模型...",
           });
+          // 兜底：百炼强模型（QWEN_3_8），与 qwen3.6-flash 同 endpoint/key
           const stream = await streamChat(MODEL_ROUTING.generate, messages);
           const result = await collectStreamWithProgress(stream, bus);
           content = result.content;

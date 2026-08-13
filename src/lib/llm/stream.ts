@@ -55,17 +55,21 @@ export function throttleByChars(
  *
  * @param stream - OpenAI 流式响应
  * @param opts - 超时配置
- * @param onText - 每个有效 chunk 回调（累计文本、增量文本），用于进度事件
+ * @param onText - 每个有效 content chunk 回调（累计文本、增量文本），用于进度事件
+ * @param onThinking - GLM reasoning_content chunk 回调（累计思考、增量思考），
+ *   用于思考过程展示；思考内容不进入产物，仅作可观测性输出
  * @returns 完整文本
  */
 export async function collectStreamText(
   stream: ChatStream,
   opts: StreamTimeoutOptions,
   onText?: (accumulated: string, delta: string) => void,
+  onThinking?: (accumulated: string, delta: string) => void,
 ): Promise<string> {
   const iterator = stream[Symbol.asyncIterator]();
   const deadline = Date.now() + opts.totalTimeoutMs;
   let content = "";
+  let thinking = "";
 
   const abort = () => {
     try {
@@ -110,8 +114,18 @@ export async function collectStreamText(
     try {
       const { done, value } = await Promise.race([iterator.next(), timeout]);
       if (done) return content;
-      // GLM：只收集 content，忽略 reasoning_content（思考过程不进入产物）
-      const delta = value.choices[0]?.delta?.content ?? "";
+      // GLM：思考过程（reasoning_content）不进入产物，仅回调用于可观测性展示
+      const delta0 = value.choices[0]?.delta as
+        | (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & {
+            reasoning_content?: string;
+          })
+        | undefined;
+      const reasoning = delta0?.reasoning_content ?? "";
+      if (reasoning) {
+        thinking += reasoning;
+        onThinking?.(thinking, reasoning);
+      }
+      const delta = delta0?.content ?? "";
       if (delta) {
         content += delta;
         onText?.(content, delta);

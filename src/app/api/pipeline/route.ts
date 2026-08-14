@@ -323,12 +323,24 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        // approve 确认门：推送规格后挂起，等待 /api/pipeline/confirm
-        //（仅含 approve 步骤的 SOP 会调用；game SOP 自动跳过）
-        // 双写 gates 表：刷新后前端可从 /api/gates/pending 重建等待确认 UI
+        // approve 确认门：自动确认，不再挂起等待。
+        // 根因：Vercel serverless 多实例——confirm 请求落在另一 lambda 实例时
+        // 内存 resolver 不可见（线上日志实锤：跨实例 recorded，流水线永不续跑），
+        // 且 300s maxDuration 会强杀挂起中的函数。挂起式确认门在 serverless
+        // 上不成立；用户后续可通过对话迭代直接修改产物。
+        // 恢复挂起门（仅单进程部署可用）：把 AUTO_APPROVE 改为 false。
+        const AUTO_APPROVE = true;
         const sessionId = crypto.randomUUID();
         const approver = async (spec: SpecOutput) => {
-          capturedSpec = spec; // 落库用：记录用户确认的规格
+          capturedSpec = spec; // 落库用：记录规格
+          if (AUTO_APPROVE) {
+            console.log("[Pipeline] approve 自动确认（跳过确认门）:", {
+              sessionId,
+              instance: INSTANCE_ID,
+            });
+            return true;
+          }
+          // 挂起式确认门（仅单进程部署可用，见上方注释）
           send({ type: "approve_needed", sessionId, spec });
           console.log("[Pipeline] 流水线挂起，等待用户确认:", {
             sessionId,

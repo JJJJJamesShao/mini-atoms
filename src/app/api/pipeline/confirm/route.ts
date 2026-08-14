@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createAuthClient } from "@/lib/supabase/auth-server";
 import { resolveApproval, type ResolveResult } from "../gate";
+import { INSTANCE_ID } from "@/lib/observability";
 
 /** 强制 Node.js runtime */
 export const runtime = "nodejs";
@@ -38,9 +39,24 @@ export async function POST(req: NextRequest) {
 
   let result: ResolveResult;
   try {
+    console.log("[Confirm] 收到确认请求:", {
+      sessionId: body.sessionId,
+      instance: INSTANCE_ID,
+      approved: body.approved,
+    });
     result = await resolveApproval(body.sessionId, user.id, body.approved);
+    console.log("[Confirm] 处理结果:", {
+      sessionId: body.sessionId,
+      instance: INSTANCE_ID,
+      result,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error("[Confirm] 处理异常:", {
+      sessionId: body.sessionId,
+      instance: INSTANCE_ID,
+      error: msg,
+    });
     return jsonError(500, { error: msg });
   }
   if (result === "not_found") {

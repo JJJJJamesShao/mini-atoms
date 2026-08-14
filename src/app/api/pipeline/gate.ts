@@ -19,6 +19,7 @@ import {
   resolveGate,
   type GatePayload,
 } from "@/lib/db/gates";
+import { INSTANCE_ID } from "@/lib/observability";
 
 interface PendingApproval {
   userId: string;
@@ -52,6 +53,11 @@ export async function waitForApproval(
     payload: GatePayload;
   },
 ): Promise<boolean> {
+  console.log("[Gate] 创建确认门:", {
+    sessionId,
+    instance: INSTANCE_ID,
+    projectId: gate.projectId,
+  });
   try {
     await createGate(
       sessionId,
@@ -61,12 +67,14 @@ export async function waitForApproval(
       gate.payload,
       APPROVAL_TIMEOUT_MS,
     );
+    console.log("[Gate] 挂起门落库成功:", { sessionId });
   } catch (err) {
     console.error("[Gate] 挂起门落库失败（降级为内存态）:", err);
   }
 
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
+      console.log("[Gate] 确认门 30min 超时，按拒绝处理:", { sessionId });
       store.delete(sessionId);
       void expireGate(sessionId).catch((err) =>
         console.error("[Gate] 超时标记 expired 失败:", err),
@@ -74,6 +82,11 @@ export async function waitForApproval(
       resolve(false);
     }, APPROVAL_TIMEOUT_MS);
     store.set(sessionId, { userId, resolve, timer });
+    console.log("[Gate] 内存 resolver 已挂起，等待 confirm:", {
+      sessionId,
+      instance: INSTANCE_ID,
+      storeSize: store.size,
+    });
   });
 }
 
@@ -91,6 +104,13 @@ export async function resolveApproval(
   userId: string,
   approved: boolean,
 ): Promise<ResolveResult> {
+  console.log("[Gate] 收到确认决策:", {
+    sessionId,
+    instance: INSTANCE_ID,
+    approved,
+    hasLocalResolver: store.has(sessionId),
+    storeSize: store.size,
+  });
   let updated: boolean;
   try {
     updated = await resolveGate(
@@ -98,6 +118,7 @@ export async function resolveApproval(
       userId,
       approved ? "approved" : "rejected",
     );
+    console.log("[Gate] DB 决策落库结果:", { sessionId, updated });
   } catch (err) {
     // DB 不可用时不阻塞内存路径（gates 表未建等场景），但归属仍须校验
     console.error("[Gate] 更新挂起门失败:", err);
@@ -107,17 +128,40 @@ export async function resolveApproval(
     // DB 无此行：可能是挂起时 createGate 瞬时失败（降级内存态），
     // 流水线仍存活——回退内存路径，与"降级不阻断流水线"的声明一致
     const pending = store.get(sessionId);
-    if (!pending || pending.userId !== userId) return "not_found";
+    if (!pending || pending.userId !== userId) {
+      console.log("[Gate] 决议结果: not_found（DB 无记录且内存无 resolver）", {
+        sessionId,
+        instance: INSTANCE_ID,
+      });
+      return "not_found";
+    }
     clearTimeout(pending.timer);
     store.delete(sessionId);
     pending.resolve(approved);
+    console.log("[Gate] 决议结果: live（内存回退路径唤醒）", { sessionId });
     return "live";
   }
 
   const pending = store.get(sessionId);
-  if (!pending || pending.userId !== userId) return "recorded";
+  if (!pending || pending.userId !== userId) {
+    // 典型事故形态：confirm 落在另一实例（跨实例）或原函数已被
+    // 平台 300s 强杀（resolver 随实例销毁）——决策已落库但无人唤醒
+    console.log(
+      "[Gate] 决议结果: recorded（无存活 resolver，流水线不会续跑）",
+      {
+        sessionId,
+        instance: INSTANCE_ID,
+        hasLocalResolver: store.has(sessionId),
+      },
+    );
+    return "recorded";
+  }
   clearTimeout(pending.timer);
   store.delete(sessionId);
   pending.resolve(approved);
+  console.log("[Gate] 决议结果: live（同实例唤醒，流水线续跑）", {
+    sessionId,
+    instance: INSTANCE_ID,
+  });
   return "live";
 }

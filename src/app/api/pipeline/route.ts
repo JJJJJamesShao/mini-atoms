@@ -16,6 +16,7 @@ import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { getUserRole, type UserRole } from "@/lib/db/profiles";
 import { createAuthClient } from "@/lib/supabase/auth-server";
 import { waitForApproval } from "./gate";
+import { INSTANCE_ID } from "@/lib/observability";
 
 /** 各角色每日 LLM 生成额度：free=0（仅罐头演示），paid 不限量 */
 const DAILY_QUOTA: Record<UserRole, number> = {
@@ -329,10 +330,20 @@ export async function POST(req: NextRequest) {
         const approver = async (spec: SpecOutput) => {
           capturedSpec = spec; // 落库用：记录用户确认的规格
           send({ type: "approve_needed", sessionId, spec });
-          return waitForApproval(sessionId, user.id, {
+          console.log("[Pipeline] 流水线挂起，等待用户确认:", {
+            sessionId,
+            instance: INSTANCE_ID,
+          });
+          const approved = await waitForApproval(sessionId, user.id, {
             projectId: projectId ?? null,
             payload: { spec, input, baseVersionNo: baseVersionNo ?? null },
           });
+          console.log("[Pipeline] 确认门返回，流水线续跑:", {
+            sessionId,
+            instance: INSTANCE_ID,
+            approved,
+          });
+          return approved;
         };
 
         // 前端按 sop.steps 动态生成阶段卡片（fix/ fail 为内部步骤，不下发；

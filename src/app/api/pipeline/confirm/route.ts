@@ -26,24 +26,35 @@ export async function POST(req: NextRequest) {
     typeof body.sessionId !== "string" ||
     typeof body.approved !== "boolean"
   ) {
+    console.log("[Confirm] 请求体非法（400）:", {
+      instance: INSTANCE_ID,
+      hasSessionId: !!body?.sessionId,
+      approvedType: typeof body?.approved,
+    });
     return jsonError(400, { error: "缺少 sessionId 或 approved 字段" });
   }
+
+  // 入口日志必须早于鉴权：401 是「卡在确认门」排障的关键分支，不可静默
+  console.log("[Confirm] 收到确认请求:", {
+    sessionId: body.sessionId,
+    instance: INSTANCE_ID,
+    approved: body.approved,
+  });
 
   const auth = await createAuthClient();
   const {
     data: { user },
   } = await auth.auth.getUser();
   if (!user) {
+    console.log("[Confirm] 鉴权失败（401）:", {
+      sessionId: body.sessionId,
+      instance: INSTANCE_ID,
+    });
     return jsonError(401, { error: "unauthorized", message: "请先登录" });
   }
 
   let result: ResolveResult;
   try {
-    console.log("[Confirm] 收到确认请求:", {
-      sessionId: body.sessionId,
-      instance: INSTANCE_ID,
-      approved: body.approved,
-    });
     result = await resolveApproval(body.sessionId, user.id, body.approved);
     console.log("[Confirm] 处理结果:", {
       sessionId: body.sessionId,
@@ -60,6 +71,10 @@ export async function POST(req: NextRequest) {
     return jsonError(500, { error: msg });
   }
   if (result === "not_found") {
+    console.log("[Confirm] 会话不存在（404）:", {
+      sessionId: body.sessionId,
+      instance: INSTANCE_ID,
+    });
     return jsonError(404, {
       error: "session_not_found",
       message: "审批会话不存在或已过期",

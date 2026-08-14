@@ -770,10 +770,18 @@ export function createLLMExecutors(
             // 继续出码，不构成致命错误（strictLength 关闭）
             progressLabel: "实现方案规划中",
           });
+          console.log("[TwoPhase] 阶段 1 完成:", {
+            planChars: plan.charCount,
+            content: plan.content.slice(0, 80),
+          });
 
           // 模型自估代码量超单次出码安全线 → 提示截断风险（仍继续尝试）
           const estimated = parseEstimatedTokens(plan.content);
           if (estimated !== null && estimated > SINGLE_SHOT_TOKEN_BUDGET) {
+            console.log("[TwoPhase] 预估超安全线:", {
+              estimated,
+              budget: SINGLE_SHOT_TOKEN_BUDGET,
+            });
             bus?.emit({
               type: "agent:thinking",
               agent: "generate",
@@ -806,6 +814,10 @@ export function createLLMExecutors(
             richProgress: true,
             // 出码期：截断 HTML 走校验/修复只会空转烧钱，显式失败
             strictLength: true,
+          });
+          console.log("[TwoPhase] 阶段 2 完成:", {
+            codeChars: r.charCount,
+            estimatedTokens: r.estimatedTokens,
           });
           content = r.content;
           charCount = r.charCount;

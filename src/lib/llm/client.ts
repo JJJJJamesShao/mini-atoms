@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { ModelConfig } from "./models";
+import { hostOf } from "@/lib/observability";
 
 /** 懒加载百炼客户端 — 构建时不检查环境变量，只在运行时检查 */
 function getBailianClient(): OpenAI {
@@ -41,6 +42,19 @@ export async function streamChat(
   config: ModelConfig,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ) {
+  const isGLM = config.model.startsWith("glm");
+  console.log("[LLM] streamChat 路由:", {
+    model: config.model,
+    provider: isGLM ? "GLM" : "百炼代理",
+    host: isGLM
+      ? hostOf(
+          process.env.GLM_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
+        )
+      : hostOf(process.env.ANTHROPIC_BASE_URL),
+    hasKey: isGLM
+      ? !!process.env.GLM_API_KEY
+      : !!process.env.ANTHROPIC_AUTH_TOKEN,
+  });
   return getClient(config.model).chat.completions.create({
     model: config.model,
     messages,
@@ -88,6 +102,16 @@ export async function streamGLM(
 ) {
   const client = getGLMClient();
   const model = process.env.GLM_5_2 ?? "glm-5.2";
+  console.log("[LLM] streamGLM 路由:", {
+    model,
+    provider: "GLM",
+    host: hostOf(
+      process.env.GLM_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
+    ),
+    hasKey: !!process.env.GLM_API_KEY,
+    thinking: options?.thinking !== false,
+    maxTokens: options?.maxTokens ?? 131072,
+  });
   const body = {
     model,
     messages,

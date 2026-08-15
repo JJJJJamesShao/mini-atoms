@@ -24,6 +24,7 @@ export default function Home() {
     selectVersion,
     approve,
     reject,
+    stopGeneration,
   } = useWorkspace();
 
   // 挂载时全局恢复挂起门：首轮生成的门 project_id 为 null，
@@ -112,6 +113,7 @@ export default function Home() {
               onApprove={approve}
               onReject={reject}
               onSend={sendFollowUp}
+              onStop={stopGeneration}
             />
           </section>
           <section className="hidden w-[45%] shrink-0 border-l border-[#e5e5e5] lg:block dark:border-neutral-700">

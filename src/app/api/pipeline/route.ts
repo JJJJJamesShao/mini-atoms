@@ -15,6 +15,8 @@ import { createMessage } from "@/lib/db/messages";
 import { countUsageToday, logUsage } from "@/lib/db/usage";
 import { getUserRole, type UserRole } from "@/lib/db/profiles";
 import { createAuthClient } from "@/lib/supabase/auth-server";
+import { checkInput } from "@/lib/moderation";
+import { registerRun, unregisterRun } from "./runs";
 import { waitForApproval } from "./gate";
 import { INSTANCE_ID } from "@/lib/observability";
 
@@ -54,6 +56,16 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
   if (!body?.input || typeof body.input !== "string") {
     return jsonError(400, { error: "缺少 input 字段" });
+  }
+
+  // 0. 内容审核：入口层拦截不合规输入，不进入鉴权/额度/LLM 任何后续环节
+  const moderation = checkInput(body.input);
+  if (moderation.blocked) {
+    return jsonError(400, {
+      error: "CONTENT_BLOCKED",
+      message: moderation.message,
+      detail: "根据相关法律法规，部分敏感内容无法处理。",
+    });
   }
 
   const { input, projectId, currentFiles, baseVersionNo } = body as {
@@ -116,6 +128,10 @@ export async function POST(req: NextRequest) {
 
   // 4. 记用量
   await logUsage(user.id, "generate");
+
+  // 5. 注册本次运行：停止按钮经 /api/pipeline/abort 取消该信号；
+  //    同用户重复提交时旧运行会被顶掉取消（runs.ts 单实例内存态，约束见其注释）
+  const runController = registerRun(user.id);
 
   // 创建 SSE 流 + Agent EventBus
   const encoder = new TextEncoder();
@@ -315,6 +331,7 @@ export async function POST(req: NextRequest) {
         const roles = createRoles();
         const executors = createLLMExecutors(bus, {
           structured: sop.id === "game",
+          signal: runController.signal,
           memories: {
             clarify: roles.pm.memory,
             spec: roles.architect.memory,
@@ -461,12 +478,16 @@ export async function POST(req: NextRequest) {
         });
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        console.error("[Pipeline Error]", errorMsg, err);
-        // 异常终止同样落库（与 done/fail 路径对齐）：出错节点标 failed，
+        // 用户主动停止（/api/pipeline/abort 取消 runController）：LLM 调用抛出
+        // 中止异常走到这里——按"手动停止"落库并通知，而非通用错误
+        const aborted = runController.signal.aborted;
+        if (!aborted) console.error("[Pipeline Error]", errorMsg, err);
+        // 异常/中止终止同样落库（与 done/fail 路径对齐）：出错节点标 failed，
         // 未触达的保持 pending，过程日志完整保留，刷新后可回放事故现场。
         // 幂等防护：正常路径已尝试落库（persistAttempted）时跳过，防止
         // persistRun 之后的 send 抛错导致同一运行二次落库。
         if (!persistAttempted) {
+          const note = aborted ? "用户手动停止生成" : `执行出错：${errorMsg}`;
           try {
             const stages: StageState[] = displaySteps.map((name) => {
               const s = stageStates.get(name);
@@ -478,26 +499,28 @@ export async function POST(req: NextRequest) {
             });
             await persistRun({
               stages,
-              notes: `执行出错：${errorMsg}`,
+              notes: note,
               questions: null,
               // 异常中断没有新产物：保留所基于的代码
               files: currentFiles ?? [],
-              assistantText: `执行出错：${errorMsg}`,
+              assistantText: note,
             });
           } catch (persistErr) {
             console.error("[Pipeline] 异常路径落库失败:", persistErr);
           }
         }
         try {
-          send({
-            type: "error",
-            message: errorMsg,
-          });
+          send(
+            aborted
+              ? { type: "aborted", message: "用户手动停止" }
+              : { type: "error", message: errorMsg },
+          );
         } catch {
           // 流已断开：错误通知丢失可接受，落库已在上面完成
         }
       } finally {
         clearInterval(heartbeatTimer);
+        unregisterRun(user.id, runController);
         controller.close();
       }
     },

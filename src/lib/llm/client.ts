@@ -37,10 +37,11 @@ function getClient(model: string): OpenAI {
   return getBailianClient();
 }
 
-/** 发起流式对话（自动按模型选择 Provider） */
+/** 发起流式对话（自动按模型选择 Provider）；signal 用于用户主动停止/看门狗断连 */
 export async function streamChat(
   config: ModelConfig,
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  options?: { signal?: AbortSignal },
 ) {
   const isGLM = config.model.startsWith("glm");
   console.log("[LLM] streamChat 路由:", {
@@ -55,13 +56,16 @@ export async function streamChat(
       ? !!process.env.GLM_API_KEY
       : !!process.env.ANTHROPIC_AUTH_TOKEN,
   });
-  return getClient(config.model).chat.completions.create({
-    model: config.model,
-    messages,
-    max_tokens: config.maxTokens,
-    temperature: config.temperature,
-    stream: true,
-  });
+  return getClient(config.model).chat.completions.create(
+    {
+      model: config.model,
+      messages,
+      max_tokens: config.maxTokens,
+      temperature: config.temperature,
+      stream: true,
+    },
+    { signal: options?.signal },
+  );
 }
 
 /**

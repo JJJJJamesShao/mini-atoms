@@ -305,6 +305,8 @@ async function runGLMPhase(
     strictLength?: boolean;
     /** 轻量进度的文案前缀（规划期用） */
     progressLabel?: string;
+    /** 用户停止信号：与首 token 看门狗并联，触发时取消 GLM 调用且不走兜底 */
+    signal?: AbortSignal;
   },
 ): Promise<{ content: string; charCount: number; estimatedTokens: number }> {
   const { bus } = opts;
@@ -315,6 +317,11 @@ async function runGLMPhase(
     watchdog.abort();
   }, GLM_FIRST_TOKEN_TIMEOUT_MS);
   const disarm = () => clearTimeout(watchdogTimer);
+  // 用户停止 → 并入看门狗 controller：任一触发都取消流；
+  // watchdogFired 保持 false，用于 catch 中区分"看门狗断连"与"用户停止"
+  opts.signal?.addEventListener("abort", () => watchdog.abort(), {
+    once: true,
+  });
 
   /** 轻量收集：节流进度 + 思考展示（规划期不需要子步骤检测与代码摘要） */
   const collectLight = async (
@@ -385,6 +392,10 @@ async function runGLMPhase(
     return result;
   } catch (glmErr) {
     disarm();
+    // 用户主动停止：直接上抛，不走百炼兜底（否则停止后继续烧 token）
+    if (opts.signal?.aborted) {
+      throw glmErr;
+    }
     if (glmErr instanceof StreamTruncatedError) {
       throw glmErr;
     }
@@ -398,7 +409,9 @@ async function runGLMPhase(
         : "GLM 服务暂不可用，降级到百炼流式模型...",
     });
     // 兜底：百炼强模型（QWEN_3_8），与 qwen3.6-flash 同 endpoint/key
-    const stream = await streamChat(MODEL_ROUTING.generate, messages);
+    const stream = await streamChat(MODEL_ROUTING.generate, messages, {
+      signal: opts.signal,
+    });
     return opts.richProgress
       ? collectStreamWithProgress(stream, bus, {
           throwOnLength: opts.strictLength,
@@ -432,11 +445,14 @@ export function createLLMExecutors(
     memories?: Partial<
       Record<"clarify" | "spec" | "generate" | "verify", AgentMemory>
     >;
+    /** 用户停止信号：透传到本运行内所有 LLM 流式调用（/api/pipeline/abort 触发） */
+    signal?: AbortSignal;
   },
 ): Executors {
   const emit = (event: Omit<AgentEvent, "timestamp">) => {
     bus?.emit(event);
   };
+  const signal = options?.signal;
   const memory = {
     clarify: options?.memories?.clarify ?? new AgentMemory(),
     spec: options?.memories?.spec ?? new AgentMemory(),
@@ -466,6 +482,7 @@ export function createLLMExecutors(
         agent: "clarify",
         role: "产品经理",
         progressLabel: "需求澄清中",
+        signal,
       });
       console.log("[DEBUG] Clarify 响应: status =", result.status);
       memory.clarify.add({
@@ -517,6 +534,7 @@ export function createLLMExecutors(
         agent: "spec",
         role: "架构师",
         progressLabel: "规格设计中",
+        signal,
       });
       console.log(
         "[DEBUG] Spec 响应: requirements =",
@@ -589,7 +607,7 @@ export function createLLMExecutors(
           );
           // 流式 + 超时保护（统一走 collectGenerateStream 公共入口）
           const rawContent = await collectGenerateStream(
-            await streamChat(MODEL_ROUTING.generate, messages),
+            await streamChat(MODEL_ROUTING.generate, messages, { signal }),
             bus,
             agentName,
             (len) => `${stage} 阶段：已生成 ${len} 字符...`,
@@ -650,7 +668,7 @@ export function createLLMExecutors(
           // 补丁是小输出：300 字符节流让进度动态可见（默认 2000 会导致
           // 整个补丁等待期零事件——曾出现第二轮修复 349 秒无反馈的观感卡死）
           const patchText = await collectGenerateStream(
-            await streamChat(MODEL_ROUTING.generate, messages),
+            await streamChat(MODEL_ROUTING.generate, messages, { signal }),
             bus,
             "generate",
             (len) => `第 ${patchRound} 轮修复：已接收 ${len} 字符 Patch...`,
@@ -746,6 +764,7 @@ export function createLLMExecutors(
             richProgress: true,
             // 结构化路径保持既有降级（截断→合并→校验→fix 循环），不启用截断抛错
             strictLength: false,
+            signal,
           });
           content = r.content;
           charCount = r.charCount;
@@ -769,6 +788,7 @@ export function createLLMExecutors(
             // 方案只是阶段 2 的建议性输入：触及 32K 上限截断时用已得部分
             // 继续出码，不构成致命错误（strictLength 关闭）
             progressLabel: "实现方案规划中",
+            signal,
           });
           console.log("[TwoPhase] 阶段 1 完成:", {
             planChars: plan.charCount,
@@ -814,6 +834,7 @@ export function createLLMExecutors(
             richProgress: true,
             // 出码期：截断 HTML 走校验/修复只会空转烧钱，显式失败
             strictLength: true,
+            signal,
           });
           console.log("[TwoPhase] 阶段 2 完成:", {
             codeChars: r.charCount,
@@ -940,6 +961,7 @@ export function createLLMExecutors(
         agent: "locate",
         role: "架构师",
         progressLabel: "改动定位中",
+        signal,
       });
       memory.spec.add({
         topic: MessageTopic.ARCH_SPEC,
@@ -988,7 +1010,7 @@ export function createLLMExecutors(
       const messages = buildModifyPatchPrompt(currentHtml, locate, feedback);
       // 补丁是小输出：300 字符节流让进度动态可见（全量生成路径默认 2000）
       const patchText = await collectGenerateStream(
-        await streamChat(MODEL_ROUTING.generate, messages),
+        await streamChat(MODEL_ROUTING.generate, messages, { signal }),
         bus,
         "patch",
         (len) => `已接收 ${len} 字符补丁...`,

@@ -15,6 +15,8 @@ interface ProjectWorkspaceProps {
   onApprove: () => void;
   onReject: () => void;
   onSend: (text: string) => void;
+  /** 停止生成：取消当前 SSE 运行并通知后端中止 LLM 调用 */
+  onStop: () => void;
 }
 
 /** 项目工作区：对话流（用户请求气泡 + 版本卡片）+ 底部输入框 */
@@ -28,6 +30,7 @@ export default function ProjectWorkspace({
   onApprove,
   onReject,
   onSend,
+  onStop,
 }: ProjectWorkspaceProps) {
   const [draft, setDraft] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
@@ -118,14 +121,24 @@ export default function ProjectWorkspace({
             }
             className="flex-1 rounded-xl border border-[#e5e5e5] bg-transparent px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-neutral-200 disabled:opacity-40 dark:border-neutral-700 dark:focus:ring-neutral-700"
           />
-          <button
-            type="button"
-            onClick={submit}
-            disabled={running || !draft.trim()}
-            className="rounded-lg bg-neutral-900 px-4 py-2 text-sm text-white transition-colors hover:bg-neutral-700 disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
-          >
-            发送
-          </button>
+          {running ? (
+            <button
+              type="button"
+              onClick={onStop}
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm text-white transition-colors hover:bg-red-500"
+            >
+              停止生成
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!draft.trim()}
+              className="rounded-lg bg-neutral-900 px-4 py-2 text-sm text-white transition-colors hover:bg-neutral-700 disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-300"
+            >
+              发送
+            </button>
+          )}
         </div>
       </div>
     </div>

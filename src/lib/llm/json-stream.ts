@@ -117,6 +117,8 @@ export interface JsonCallOptions {
   progressLabel: string;
   /** 最大尝试次数（含首次），默认 1 + MAX_JSON_RETRIES */
   maxAttempts?: number;
+  /** 用户停止信号：透传给底层流式调用 */
+  signal?: AbortSignal;
   /** 测试注入：替换底层流式调用（生产代码不传） */
   chatFn?: typeof streamChat;
 }
@@ -132,7 +134,7 @@ export async function callJsonLlm<T>(opts: JsonCallOptions): Promise<T> {
   let messages = opts.messages;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const stream = await chat(opts.config, messages);
+    const stream = await chat(opts.config, messages, { signal: opts.signal });
     const text = await collectStreamText(
       stream,
       FAST_JSON_STREAM_TIMEOUTS,

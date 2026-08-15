@@ -165,6 +165,10 @@ export function useWorkspace() {
   const restoredGateCreatedAt = useRef<string | null>(null);
   /** 当前运行版本的阶段列表（由服务端 SOP 动态下发，默认完整流程） */
   const activeStages = useRef<readonly string[]>(STAGE_ORDER);
+  /** 当前 SSE 请求的 AbortController（停止按钮取消 fetch/读取） */
+  const fetchAbortRef = useRef<AbortController | null>(null);
+  /** 停止按钮标记：区分"用户主动停止"与其他失败（catch 文案分支用） */
+  const userAbortRef = useRef(false);
 
   const stopResumePolling = useCallback(() => {
     if (resumePollTimer.current) {
@@ -198,6 +202,7 @@ export function useWorkspace() {
       activeVersionId.current = id;
       approvalSessionId.current = null;
       activeStages.current = STAGE_ORDER;
+      userAbortRef.current = false;
       stopResumePolling(); // 新运行开始，停止恢复模式的轮询
       // 新项目必须先清空已持久化的项目 id，否则会被错误追加到上一个项目
       if (freshProject) lastPersistedProjectId.current = null;
@@ -428,6 +433,9 @@ export function useWorkspace() {
             const versionNo = event.versionNo;
             updateVersion(id, (v) => ({ ...v, versionNo }));
           }
+          // 通知 Sidebar 等项目列表消费者重新拉取：新项目/新版本落库后
+          // 左侧列表自动更新，无需手动刷新页面
+          window.dispatchEvent(new CustomEvent("mini-atoms:projects-changed"));
         } else if (type === "done") {
           const result = event.result as {
             files: { path: string; content: string }[];
@@ -474,6 +482,11 @@ export function useWorkspace() {
             ...v,
             note: `${v.note ?? ""}（保存到云端失败：${event.message}）`,
           }));
+        } else if (type === "aborted") {
+          // 后端确认用户停止（同实例命中 /api/pipeline/abort 时下发）
+          const msg = "已手动停止生成";
+          finalizeStages("failed", msg);
+          failVersion(msg);
         } else if (type === "error") {
           const msg = `服务端错误：${event.message}`;
           finalizeStages("failed", msg);
@@ -495,10 +508,14 @@ export function useWorkspace() {
           payload.projectId = lastPersistedProjectId.current;
         }
 
+        // 每次运行独立的 AbortController：停止按钮经 fetchAbortRef 取消本请求
+        const abortController = new AbortController();
+        fetchAbortRef.current = abortController;
         const response = await fetch("/api/pipeline", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
+          signal: abortController.signal,
         });
 
         if (!response.ok) {
@@ -550,10 +567,25 @@ export function useWorkspace() {
           }
         }
       } catch (err) {
-        failVersion(
-          err instanceof Error ? err.message : `请求出错：${String(err)}`,
-        );
+        if (userAbortRef.current) {
+          // 用户主动停止：fetch 中止异常走到这里，按停止文案收敛（区别于异常失败）
+          updateVersion(id, (v) => ({
+            ...v,
+            status: "failed",
+            stages: v.stages.map((s) =>
+              s.status === "active" || s.status === "pending"
+                ? { ...s, status: "failed" }
+                : s,
+            ),
+            note: "已手动停止生成",
+          }));
+        } else {
+          failVersion(
+            err instanceof Error ? err.message : `请求出错：${String(err)}`,
+          );
+        }
       } finally {
+        fetchAbortRef.current = null;
         if (heartbeatChecker) clearInterval(heartbeatChecker);
         setRunning(false);
         setAwaitingApproval(false);
@@ -1001,6 +1033,19 @@ export function useWorkspace() {
     settleRestoredDecision,
   ]);
 
+  /**
+   * 停止生成：先本地中止 SSE 读取（UI 状态收尾在 runVersion 的 catch/finally），
+   * 再尽力通知后端取消 LLM 调用——serverless 多实例下 abort 请求可能落在
+   * 无此运行的实例（404），属预期降级，不视为错误、不阻塞本地断流。
+   */
+  const stopGeneration = useCallback(() => {
+    const controller = fetchAbortRef.current;
+    if (!controller) return;
+    userAbortRef.current = true;
+    controller.abort();
+    void fetch("/api/pipeline/abort", { method: "POST" }).catch(() => {});
+  }, []);
+
   return {
     project,
     selectedVersionId,
@@ -1015,5 +1060,6 @@ export function useWorkspace() {
     selectVersion: setSelectedVersionId,
     approve,
     reject,
+    stopGeneration,
   };
 }

@@ -44,44 +44,56 @@ export default function Sidebar({ onHome, onOpenProject }: SidebarProps) {
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
   const menuTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // 加载项目列表（数据获取不是 setState，在 effect 中是合法模式）
+  // 加载项目列表（数据获取不是 setState，在 effect 中是合法模式）；
+  // 并监听 Pipeline 落库事件（project_created/project_updated 时 useWorkspace
+  // 派发）自动重新拉取，新项目/新版本无需手动刷新页面即出现在列表中
   useEffect(() => {
     let cancelled = false;
+    const load = () => {
+      setError(null);
+      fetch("/api/projects")
+        .then((res) => {
+          if (res.status === 401) return { projects: [] };
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          if (cancelled) return;
+          setProjects(
+            (data.projects ?? []).map(
+              (p: {
+                id: string;
+                title: string;
+                created_at: string;
+                pinned?: boolean;
+              }) => ({
+                id: p.id,
+                title: p.title,
+                updatedAt: new Date(p.created_at).toLocaleDateString(),
+                pinned: !!p.pinned,
+              }),
+            ),
+          );
+        })
+        .catch((err) => {
+          if (!cancelled)
+            setError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    };
     setLoading(true);
-    setError(null);
-    fetch("/api/projects")
-      .then((res) => {
-        if (res.status === 401) return { projects: [] };
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        if (cancelled) return;
-        setProjects(
-          (data.projects ?? []).map(
-            (p: {
-              id: string;
-              title: string;
-              created_at: string;
-              pinned?: boolean;
-            }) => ({
-              id: p.id,
-              title: p.title,
-              updatedAt: new Date(p.created_at).toLocaleDateString(),
-              pinned: !!p.pinned,
-            }),
-          ),
-        );
-      })
-      .catch((err) => {
-        if (!cancelled)
-          setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    load();
+    // 事件触发的刷新不重置 loading：后台静默更新，避免骨架屏闪烁
+    const onProjectsChanged = () => load();
+    window.addEventListener("mini-atoms:projects-changed", onProjectsChanged);
     return () => {
       cancelled = true;
+      window.removeEventListener(
+        "mini-atoms:projects-changed",
+        onProjectsChanged,
+      );
     };
   }, []);
 
